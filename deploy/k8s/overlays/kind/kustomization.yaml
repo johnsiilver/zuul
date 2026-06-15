@@ -1,0 +1,20 @@
+# Kind overlay: layer local-image settings on top of the production manifest without
+# touching it. Used by the mage k8s targets. Because it references zuul.yaml one
+# directory up, render it with: kubectl kustomize --load-restrictor LoadRestrictionsNone .
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../zuul.yaml
+
+# Retag the image to the locally-built/side-loaded zuul:test (source is zuul:latest).
+images:
+  - name: zuul
+    newTag: test
+
+# Use the image kind already has on its node rather than pulling from a registry.
+patches:
+  - path: patch-imagepullpolicy.yaml
+    target:
+      kind: StatefulSet
+      name: zuul

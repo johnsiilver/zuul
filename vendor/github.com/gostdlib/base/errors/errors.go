@@ -1,0 +1,677 @@
+/*
+Package errors provides an error type suitable for all errors returned by packages used to build services using
+the base/ set of packages. This error type can be used to automatically handle error logging and RPC error returns.
+
+This package should be used to build a service specific error package and not used directly.
+
+Services should create their own errors packages. This can be achieved for new projects using
+the genproject tool. Otherwise, you can copy the following and fill it in. Remember that
+you must use "go generate" for everything to work.
+
+	package errors
+
+	import (
+	    "github.com/gostdlib/base/context"
+		"github.com/gostdlib/base/errors"
+	)
+
+	//go:generate stringer -type=Category -linecomment
+
+	// Category represents the category of the error.
+	type Category uint32
+
+	func (c Category) Category() string {
+		return c.String()
+	}
+
+	const (
+		// CatUnknown represents an unknown category. This should not be used.
+		CatUnknown Category = Category(0) // Unknown
+		// ADD YOUR OWN CATEGORIES HERE
+	)
+
+	//go:generate stringer -type=Type -linecomment
+
+	// Type represents the type of the error.
+	type Type uint16
+
+	func (t Type) Type() string {
+		return t.String()
+	}
+
+	const (
+		// TypeUnknown represents an unknown type.
+		TypeUnknown Type = Type(0) // Unknown
+
+		// ADD YOUR OWN TYPES HERE
+	)
+
+	// LogAttrer is an interface that can be implemented by an error to return a list of attributes
+	// used in logging.
+	type LogAttrer = errors.LogAttrer
+
+	// Error is the error type for this service. Error implements github.com/gostdlib/base/errors.E .
+	type Error = errors.Error
+
+	// E creates a new Error with the given parameters.
+	// YOU CAN REPLACE this with your own base error constructor. See github.com/gostdlib/base/errors for more info.
+	func E(ctx context.Context, c errors.Category, t errors.Type, msg error, options ...errors.EOption) Error {
+	    return errors.E(ctx, c, t, msg, options...)
+	}
+
+You should include a file for your package called stdlib.go that is a copy of base/errors/stdlib/stdlib.go .
+This will prevent needing to import multiple "errors" packages with renaming.
+
+This package is meant to allow extended errors that add additional attributes to our "Error" type.
+For example, you could create a SQLQueryErr like so:
+
+		// SQLQueryErr is an example of a custom error that can be used to wrap a SQL error for more information.
+		// Should be created with NewSQLQueryErr().
+		type SQLQueryErr struct {
+			// Query is the SQL query that was being executed.
+			Query string
+			// Msg is the error message from the SQL query.
+			Msg   error
+		}
+
+		// NewSQLQueryErr creates a new SQLQueryErr wrapped in Error.
+		func NewSQLQueryErr(q string, msg error) Error {
+			return E(
+				CatInternal,
+				TypeUnknown,
+				SQLQueryErr{
+					Query: q,
+					Msg:   msg,
+				},
+	   			WithCallNum(2),
+			)
+		}
+
+		// Error returns the error message.
+		func (s SQLQueryErr) Error() string {
+			return s.Msg.Error()
+		}
+
+		// Is returns true if the target is an SQLQueryErr type regardless of the Query or Msg.
+		func (s SQLQueryErr) Is(target error) bool {
+			if _, ok := target.(SQLQueryErr); ok {
+				return true
+			}
+			return false
+		}
+
+		// Unwrap unwraps the error.
+		func (s SQLQueryErr) Unwrap() error {
+			return s.Msg
+		}
+
+		// Attrs implements the Attrer.Attrs() interface.
+		func (s SQLQueryErr) Attrs() []slog.Attr {
+			// You will notice here that I group the attributes with a category that includes the package path.
+			// This is to prevent attribute name collisions with other packages.
+			return []slog.Attr{slog.Group("package/path.SQLQueryErr", "Query", s.Query)}
+		}
+
+Now a program can create a compatible error that will detail our additional attributes for logging.
+
+	// Example of creating a SQLQueryErr
+	err := errors.NewSQLQueryErr("SELECT * FROM users", errors.New("SQL Error"))
+
+In the case you want to have a more detailed top level error message than Error provides, it is simple to provide this
+extra data in the error message.  Simply replace the `E` constructor in your `errors` package with custom one:
+
+	// Args are arguments for creating our Error type.
+	type Args struct {
+		Category Category
+		Type type
+		Msg error
+
+		ExtraField string
+	}
+
+	// Extended is an example of an the extended Error type containing the extra field.
+	// This extra field will ge promoted to the top level of the log message.
+	type Extended struct {
+		ExtraField string
+	}
+
+	// Error returns the error message.
+	func (s Extended) Error() string {
+		return s.Msg.Error()
+	}
+
+	// Unwrap unwraps the error.
+	func (s Extended) Unwrap() error {
+		return s.Msg
+	}
+
+	// Attrs implements the Attrer.Attrs() interface.
+	func (s Extended) Attrs() []slog.Attr {
+		// Notice that unlike in the SQLQueryErr, we are not grouping the attributes.
+		// This will cause the attributes to be at the top level of the log message.
+		// This is generally only done in places like this where we are extending the base error.
+		return []slog.Attr{
+			slog.Any("ExtraField", s.ExtraField),
+		}
+	}
+
+	// E creates a new Error with the given parameters.
+	func E(ctx context.Context, args Args) E {
+		return errors.E(ctx, s.Category, s.Type, Extended{ExtraField: s.ExtraField, Msg: s.Msg})
+	}
+
+Our E constructor now returns an Extended type that includes the exta field we wanted and can be used to
+wrap other errors. This pattern can easily be extended to include more fields as needed if all errors require
+these additional fields.
+
+Note: This package returns concrete types.  While our constructors return our concrete type, functions or methods
+returning the value should always return the error interface and never our custom "Error" concrete type.
+
+There is a sub-directory called example/ that shows an errors package for a service which can be the
+base for your package.
+*/
+package errors
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math"
+	"reflect"
+	"runtime"
+	"runtime/debug"
+	"strings"
+	"time"
+	"unsafe"
+
+	goctx "github.com/gostdlib/base/context"
+	ictx "github.com/gostdlib/base/internal/context"
+	ierr "github.com/gostdlib/base/internal/errors"
+	"github.com/gostdlib/base/telemetry/log"
+	"github.com/gostdlib/base/telemetry/otel/metrics"
+	"github.com/gostdlib/base/telemetry/otel/trace/span"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
+	otelTrace "go.opentelemetry.io/otel/trace"
+)
+
+// LogAttrer is an interface that can be implemented by an error to return a list of attributes
+// used in logging.
+type LogAttrer interface {
+	// LogAttrs returns a []slog.Attr that will be used in logging.
+	LogAttrs(ctx context.Context) []slog.Attr
+}
+
+// TraceAttrer is an interface that can be implemented by an error to return a list of attributes
+// used in tracing. Keys should be prepended by the given string. This is used by Error to
+// add the package name of the error type attribute key to prevent collisions.
+type TraceAttrer interface {
+	TraceAttrs(ctx context.Context, prepend string, attrs span.Attributes) span.Attributes
+}
+
+// Category is the category of the error.
+type Category interface {
+	Category() string
+}
+
+// Type is the type of the error.
+type Type interface {
+	Type() string
+}
+
+type errImplements interface {
+	error
+	LogAttrer
+
+	Is(target error) bool
+	Unwrap() error
+}
+
+// Validate we implement the correct interfaces.
+var _ errImplements = Error{}
+
+// Error is the basic error type that is used to represent an error. Users should create their own
+// "errors" package for their service with an E() method that creates a type that returns Error
+// with their information. Any type that implements Error should also
+// be JSON serializable for logging output.
+// Error represents an error that has a category and a type. Created with E(), should not be hand created.
+type Error struct {
+	// Category is the category of the error. Should always be provided.
+	Category Category
+	// Type is the type of the error. This is a subcategory of the Category.
+	// It is not always provided.
+	Type Type
+	// Msg is the message of the error.
+	Msg error
+	// MsgOveride is the message that should be used in place of the error message. This can happen
+	// if the error message is sensitive or contains PII.
+	MsgOverride string
+
+	// File is the file that the error was created in. This is automatically
+	// filled in by the E().
+	File string
+	// Line is the line that the error was created on. This is automatically
+	// filled in by the E().
+	Line int
+	// ErrTime is the time that the error was created. This is automatically filled
+	// in by E(). This is in UTC.
+	ErrTime time.Time
+	// StackTrace is the stack trace of the error. This is automatically filled
+	// in by E() if WithStackTrace() is used.
+	StackTrace string
+	// LogLevel is the log level that should be used when logging this error. By default this is
+	// slog.LevelError, but in some cases you may want to log at a different level, such as slog.LevelWarn for a retryable error.
+	LogLevel slog.Level
+	// IsFunc is a function that can be used to override the Is() method. This is useful for
+	// cases where you want to consider two errors the same even if they have different categories or types,
+	// such as in the case of a SQLQueryErr where you want to consider all SQLQueryErrs the same regardless of the
+	// query or error message.
+	IsFunc func(target error) bool
+
+	attrs []slog.Attr
+}
+
+// EOption is an optional argument for E().
+type EOption = ierr.EOption
+
+// WithSuppressTraceErr will prevent the trace as being recorded with an error status.
+// The trace will still receive the error message. This is useful for errors that are
+// retried and you only want to get a status of error if the error is not resolved.
+func WithSuppressTraceErr() EOption {
+	return func(e ierr.EOpts) ierr.EOpts {
+		e.SuppressTraceErr = true
+		return e
+	}
+}
+
+// WithCallNum is used if you need to set the runtime.CallNum() in order to get the correct filename and line.
+// This can happen if you create a call wrapper around E(), because you would then need to look up one more stack frame
+// for every wrapper. This defaults to 1 which sets to the frame of the caller of E().
+func WithCallNum(i int) EOption {
+	return func(e ierr.EOpts) ierr.EOpts {
+		e.CallNum = i
+		return e
+	}
+}
+
+// WithStackTrace will add a stack trace to the error. This is useful for debugging in certain rare
+// cases. This is not recommended for general use as it can cause performance issues when errors
+// are created frequently.
+func WithStackTrace() EOption {
+	return func(e ierr.EOpts) ierr.EOpts {
+		e.StackTrace = true
+		return e
+	}
+}
+
+// WithAttrs adds the given attributes to the error. These attributes will be included
+// in logging output. This is in addition to any attributes that are in the Context.
+func WithAttrs(attrs ...slog.Attr) EOption {
+	return func(e ierr.EOpts) ierr.EOpts {
+		e.Attrs = append(e.Attrs, attrs...)
+		return e
+	}
+}
+
+// WithLogLevel sets the log level that should be used when logging this error. By default this is
+// slog.LevelError, but in some cases you may want to log at a different level, such as slog.LevelWarn for a retryable error.
+// Note that this does not affect the trace status, which will still be recorded as an error unless WithSuppressTraceErr() is used.
+func WithLogLevel(level slog.Level) EOption {
+	return func(e ierr.EOpts) ierr.EOpts {
+		e.LogLevel = level
+		return e
+	}
+}
+
+var now = time.Now
+
+// E creates a new Error with the given parameters. If the message is already an Error, it will be returned instead.
+func E(ctx context.Context, c Category, t Type, msg error, options ...EOption) Error {
+	if e, ok := msg.(Error); ok {
+		return e
+	}
+
+	opts := ierr.EOpts{CallNum: 1, LogLevel: slog.LevelError}
+
+	// Apply local options.
+	for _, o := range options {
+		opts = o(opts)
+	}
+
+	// Apply call specific options.
+	for _, o := range ictx.EOptions(ctx) {
+		opts = o(opts)
+	}
+
+	_, filename, line, ok := runtime.Caller(opts.CallNum)
+	if !ok {
+		filename = "unknown"
+	}
+
+	if msg == nil {
+		msg = errors.New("bug: nil error")
+	}
+
+	var st string
+	if opts.StackTrace {
+		st = bytesToStr(debug.Stack())
+	}
+
+	attrs := make([]slog.Attr, 0, len(opts.Attrs)+len(goctx.Attrs(ctx)))
+	attrs = append(attrs, opts.Attrs...)
+	attrs = append(attrs, goctx.Attrs(ctx)...)
+
+	e := Error{
+		Category:   c,
+		Type:       t,
+		File:       filename,
+		Line:       line,
+		Msg:        msg,
+		ErrTime:    now().UTC(),
+		StackTrace: st,
+		LogLevel:   opts.LogLevel,
+		attrs:      attrs,
+	}
+
+	e.trace(ctx, opts.SuppressTraceErr)
+	e.metrics()
+	return e
+}
+
+// Error implements the error interface.
+func (e Error) Error() string {
+	if e.MsgOverride != "" {
+		return e.MsgOverride
+	}
+	return e.Msg.Error()
+}
+
+// Is implements the errors.Is() interface. An Error is equal to another Error if the category and type are the same.
+// If the target error has a nil category and type, then it will not be considered equal to any Error.
+// This is to prevent accidentally considering an error with a nil category and type as equal to all errors.
+// If IsFunc is provided, it will be used instead of the default behavior.
+func (e Error) Is(target error) bool {
+	if target == nil {
+		return false
+	}
+	if e.IsFunc != nil {
+		return e.IsFunc(target)
+	}
+	if targetE, ok := target.(Error); ok {
+		if e.IsZero() && targetE.IsZero() {
+			return true
+		}
+		if targetE.Category == nil && targetE.Type == nil {
+			return false
+		}
+		return e.Category == targetE.Category && e.Type == targetE.Type
+	}
+	return false
+}
+
+// Unwrap unwraps the error.
+func (e Error) Unwrap() error {
+	return e.Msg
+}
+
+// LogAttrs implements the LogAttrer.LogAttrs() interface. Note that LogAttrs() will not get
+// attrs that are in the passed Context, it returns the errors standard attributes + attributes
+// from when the error was created.
+func (e Error) LogAttrs(ctx context.Context) []slog.Attr {
+	var (
+		cat = "Unknown"
+		typ = "Unknown"
+	)
+	if e.Category != nil {
+		cat = e.Category.Category()
+	}
+	if e.Type != nil {
+		typ = e.Type.Type()
+	}
+
+	traceID := ""
+	span := span.Get(ctx)
+	if span.IsRecording() {
+		if span.Span.SpanContext().HasTraceID() {
+			traceID = span.Span.SpanContext().TraceID().String()
+		}
+	}
+
+	attrs := make([]slog.Attr, 0, 7+len(e.attrs))
+	attrs = append(attrs, e.attrs...)
+	if cat != "" {
+		attrs = append(attrs, slog.String("Category", cat))
+	}
+	if typ != "" {
+		attrs = append(attrs, slog.String("Type", typ))
+	}
+	attrs = append(
+		attrs,
+		slog.String("ErrSrc", e.File),
+		slog.Int("ErrLine", e.Line),
+		slog.Time("ErrTime", e.ErrTime.UTC()),
+	)
+
+	if traceID != "" {
+		attrs = append(attrs, slog.String("TraceID", traceID))
+	}
+
+	if e.StackTrace != "" {
+		attrs = append(attrs, slog.String("StackTrace", e.StackTrace))
+	}
+
+	return attrs
+}
+
+// TraceAttrs converts the error to a list of trace attributes consumable
+// by the OpenTelemetry trace package. This does not include attributes on the .Msg field.
+// However, it will look at the slog.Attr fields on the error and in the Context and convert
+// them to trace attributes. Specifically, we support the following slog.Value kinds:
+// - Bool
+// - Int64
+// - Uint64
+// - Float64
+// - String
+// - Duration - adds _ns to the key and records as int64 nanoseconds
+// - Time     - adds _unix_ns to the key and records as int64 unix nanoseconds
+// - Group    - Supports a group of any of the above types, the key for the group becomes a namespace prefix
+//
+// Not supported:
+// - Any       - I'm not sure what to do with this
+// - LogValuer - and not sure with this either
+// These are added to the attrs passed in and returned.
+//
+// Prepend is a string that is prepended to all attribute keys. This is should be a namespace, which should
+// use the namespace method with "." in the prepend.
+func (e Error) TraceAttrs(ctx context.Context, prepend string, attrs span.Attributes) span.Attributes {
+	if attrs.Err() != nil {
+		return attrs
+	}
+
+	if attrs.Attrs == nil {
+		attrs.Attrs = make([]attribute.KeyValue, 0, 4)
+	}
+
+	// Unlike logging, we don't add time, as that gets recorded on the span.
+	// No need for TraceID as it's already on the span.
+	if e.Category != nil && e.Category.Category() != "" {
+		attrs.Add(attribute.String("Category", e.Category.Category()))
+	}
+	if e.Type != nil && e.Type.Type() != "" {
+		attrs.Add(attribute.String("Type", e.Type.Type()))
+	}
+	attrs.Add(attribute.String("ErrSrc", e.File))
+	attrs.Add(attribute.Int("ErrLine", e.Line))
+	for _, akv := range slogAttrsToOtelAttrs([]string{prepend}, e.attrs) {
+		attrs.Add(akv)
+	}
+
+	return attrs
+}
+
+// IsZero returns true if the error is a zero value. This can be used to check if an error has been set or not.
+func (e Error) IsZero() bool {
+	return e.Category == nil && e.Type == nil && e.Msg == nil && e.File == "" && e.Line == 0 && e.ErrTime.IsZero() && e.StackTrace == "" && len(e.attrs) == 0 && e.LogLevel == slog.Level(0) && e.IsFunc == nil
+}
+
+// slogAttrsToOtelAttrs converts a list of slog.Attr to a list of OpenTelemetry attribute.KeyValue.
+func slogAttrsToOtelAttrs(namespace []string, attrs []slog.Attr) []attribute.KeyValue {
+	akvs := make([]attribute.KeyValue, 0, len(attrs))
+	for _, skv := range attrs {
+		akvs = append(akvs, slogAttrToOtelAttr(namespace, skv)...)
+	}
+	return akvs
+}
+
+// slogAttrToOtelAttr converts a single slog.Attr to a list of OpenTelemetry attribute.KeyValue.
+func slogAttrToOtelAttr(namespace []string, kv slog.Attr) []attribute.KeyValue {
+	namespace = append(namespace, kv.Key)
+	key := strings.Join(namespace, ".")
+
+	switch kv.Value.Kind() {
+	case slog.KindBool:
+		return []attribute.KeyValue{attribute.Bool(key, kv.Value.Bool())}
+	case slog.KindInt64:
+		return []attribute.KeyValue{attribute.Int64(key, kv.Value.Int64())}
+	case slog.KindUint64:
+		if kv.Value.Uint64() < math.MaxInt64 {
+			return []attribute.KeyValue{attribute.Int64(key, int64(kv.Value.Uint64()))}
+		}
+		log.Default().Warn(fmt.Sprintf("slogAttrToOtelAttr: uint64 value %d for key %q exceeds int64 range, attribute dropped", kv.Value.Uint64(), key))
+	case slog.KindFloat64:
+		return []attribute.KeyValue{attribute.Float64(key, kv.Value.Float64())}
+	case slog.KindString:
+		return []attribute.KeyValue{attribute.String(key, kv.Value.String())}
+	case slog.KindDuration:
+		k := key
+		if !strings.HasSuffix(k, "ns") {
+			k = k + "_ns"
+		}
+		return []attribute.KeyValue{
+			{
+				Key:   attribute.Key(k),
+				Value: attribute.Int64Value(int64(kv.Value.Duration())),
+			},
+		}
+	case slog.KindTime:
+		k := key
+		if !strings.HasSuffix(k, "unix_ns") {
+			k = k + "_unix_ns"
+		}
+		return []attribute.KeyValue{
+			{
+				Key:   attribute.Key(k),
+				Value: attribute.Int64Value(int64(kv.Value.Time().UnixNano())),
+			},
+		}
+	case slog.KindGroup:
+		return slogAttrsToOtelAttrs(namespace, kv.Value.Group())
+	case slog.KindAny, slog.KindLogValuer:
+		log.Default().Warn(fmt.Sprintf("slogAttrToOtelAttr: unsupported slog.Value kind %v for key %q, attribute dropped", kv.Value.Kind(), key))
+		return nil
+	}
+	return nil
+}
+
+// trace adds the error to the trace span. This is automatically done when the error is created.
+func (e Error) trace(ctx context.Context, suppressTraceErr bool) {
+	if ctx == nil {
+		return
+	}
+
+	s := span.Get(ctx)
+
+	if !s.IsRecording() {
+		return
+	}
+
+	attrs := e.TraceAttrs(ctx, "", span.Attributes{})
+	for err := errors.Unwrap(e.Msg); err != nil; err = errors.Unwrap(err) {
+		if t, ok := err.(TraceAttrer); ok {
+			ty := reflect.TypeOf(t)
+			t.TraceAttrs(ctx, ty.PkgPath()+".", attrs)
+		}
+	}
+
+	options := []otelTrace.EventOption{}
+	if len(attrs.Attrs) > 0 {
+		options = append(options, otelTrace.WithAttributes(attrs.Attrs...))
+		options = append(options, otelTrace.WithTimestamp(e.ErrTime))
+	}
+	s.Span.RecordError(
+		e,
+		options...,
+	)
+	if !suppressTraceErr {
+		s.Status(codes.Error, e.Error())
+	}
+}
+
+const meterName = "github.com/gostdlib/base/errors"
+
+// metrics records the error in the metrics system using the Category() and Type() as the metric name
+// in the format: <Category>.<Type>.
+func (e Error) metrics() {
+	var mp = metrics.Default()
+	if mp == nil {
+		return // No metrics system, nothing to do.
+	}
+	m := mp.Meter(meterName)
+	if m == nil {
+		return // No meter, nothing to do.
+	}
+
+	catStr := ""
+	typStr := ""
+	if e.Category != nil {
+		catStr = e.Category.Category()
+	}
+	if e.Type != nil {
+		typStr = e.Type.Type()
+	}
+
+	if catStr == "" && typStr == "" {
+		return // No category or type, nothing to do.
+	}
+
+	n := fmt.Sprintf("%s.%s", catStr, typStr)
+	m.Int64Counter(n)
+}
+
+// Log logs the error with the given callID and customerID for easy lookup. Also
+// logs the request that caused the error. The request is expected to be JSON serializable.
+// If the req is a proto, this will used protojson to marshal it.
+func (e Error) Log(ctx context.Context) {
+	if e.Msg == nil {
+		return
+	}
+
+	ctxAttrs := goctx.Attrs(ctx)
+	logAttrs := e.LogAttrs(ctx)
+	var attrs = make([]slog.Attr, 0, 3+len(logAttrs)+len(ctxAttrs))
+	attrs = append(attrs, logAttrs...)
+	attrs = append(attrs, ctxAttrs...)
+
+	if f, ok := e.Msg.(LogAttrer); ok {
+		attrs = append(attrs, f.LogAttrs(ctx)...)
+	}
+
+	for err := errors.Unwrap(e.Msg); err != nil; err = errors.Unwrap(err) {
+		if f, ok := err.(LogAttrer); ok {
+			attrs = append(attrs, f.LogAttrs(ctx)...)
+		}
+	}
+
+	log.Default().LogAttrs(ctx, e.LogLevel, e.Msg.Error(), attrs...)
+}
+
+// bytesToStr converts a byte slice to a string without copying the data.
+func bytesToStr(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(&b[0], len(b))
+}

@@ -1,0 +1,386 @@
+syntax = "proto3";
+
+// Package zuul.v1 is Zuul's native, client-facing gRPC API: distributed locks,
+// leader election, sessions/leases, and cluster administration.
+//
+// Two invariants run through the whole API:
+//   - Fencing. Every acquisition (Lock, Campaign) returns a monotonically
+//     increasing fencing_token. Every mutating follow-up (Unlock, Proclaim,
+//     Resign) must present the token it was given; a stale token is rejected.
+//     This is the Kleppmann safety property: a paused-then-resumed client cannot
+//     act on a lock that has since moved on.
+//   - Leasing. A client identity (client_id) owns its locks and candidacies
+//     through a lease that must be kept alive (see Session.KeepAlive). When the
+//     lease expires, every resource the client held is released and the next
+//     FIFO waiter is promoted. No client can hold a resource forever by crashing.
+package zuul.v1;
+
+option go_package = "github.com/johnsiilver/zuul/proto/zuul/v1;zuulv1";
+
+import "google/protobuf/any.proto";
+
+// ReadMode selects the consistency of a read (Status / Leader).
+enum ReadMode {
+	// READ_MODE_UNKNOWN is the unset zero value; servers treat it as LINEARIZABLE.
+	READ_MODE_UNKNOWN = 0;
+	// READ_MODE_LINEARIZABLE confirms the read against the shard leader
+	// (ReadIndex): it reflects every write acknowledged before the read began.
+	READ_MODE_LINEARIZABLE = 1;
+	// READ_MODE_STALE serves from the local replica without leader confirmation:
+	// faster, but may be slightly behind.
+	READ_MODE_STALE = 2;
+}
+
+// Session manages a client's lease. The lease is the client's liveness signal:
+// hold it and you keep your locks and candidacies; lose it and the cluster
+// reclaims them. One bidirectional KeepAlive stream is the entire session.
+service Session {
+	// KeepAlive is a long-lived bidirectional heartbeat. The first request may
+	// carry a client-chosen client_id and a requested ttl_ms to establish the
+	// session; if client_id is empty the server assigns one and returns it on the
+	// first response. Each later request refreshes the lease; each response
+	// reports the granted deadline. A single heartbeat fans out to exactly the
+	// shards where the client holds resources. Closing the stream (or letting the
+	// deadline pass) expires the lease and releases everything the client held.
+	rpc KeepAlive(stream KeepAliveRequest) returns (stream KeepAliveResponse);
+}
+
+message KeepAliveRequest {
+	// client_id identifies the session owner. Set on the first request to claim an
+	// identity, or leave empty to be assigned one; ignored on later requests.
+	string client_id = 1;
+	// ttl_ms is the requested lease duration in milliseconds. Honored on the first
+	// request; the server may clamp it to its configured bounds.
+	int64 ttl_ms = 2;
+}
+
+message KeepAliveResponse {
+	// client_id is the session's identity (echoed, or assigned by the server).
+	string client_id = 1;
+	// ttl_ms is the lease duration the server granted (possibly clamped).
+	int64 ttl_ms = 2;
+	// deadline_unix_nano is the absolute time, in Unix nanoseconds on the server
+	// clock, by which the next heartbeat must arrive to keep the lease alive.
+	int64 deadline_unix_nano = 3;
+}
+
+// Locker provides fenced, lease-bound mutual-exclusion locks. A lock is named by
+// an arbitrary key; the key routes to exactly one Raft shard, so all of a lock's
+// operations are single-shard and linearizable. v1 is plain mutual exclusion
+// only (no shared/exclusive modes).
+service Locker {
+	// Lock acquires the named lock, blocking until it is held or the optional wait
+	// deadline passes. While blocked, the caller holds a FIFO place in line and is
+	// promoted in arrival order. Set wait_deadline_unix_nano to bound the wait;
+	// leave it 0 to block until acquired or the RPC context is cancelled.
+	rpc Lock(LockRequest) returns (LockResponse);
+	// TryLock acquires the named lock only if it is immediately free. It never
+	// enqueues and never blocks: acquired is false if the lock is already held.
+	rpc TryLock(TryLockRequest) returns (TryLockResponse);
+	// Unlock releases a lock the caller holds. It requires the fencing_token from
+	// the acquisition; a stale token is rejected and the lock is left untouched.
+	rpc Unlock(UnlockRequest) returns (UnlockResponse);
+	// Status reports the current holder and the number of waiters queued behind
+	// the lock, at the requested consistency.
+	rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+message LockRequest {
+	// name is the lock key.
+	string name = 1;
+	// client_id is the acquiring session's identity. It must have a live lease.
+	string client_id = 2;
+	// wait_deadline_unix_nano bounds a blocking acquire: if the lock is not granted
+	// by this absolute server-clock time (Unix nanoseconds), the call returns with
+	// acquired = false. 0 means block until acquired or the RPC context ends.
+	int64 wait_deadline_unix_nano = 3;
+}
+
+message LockResponse {
+	// acquired reports whether the lock is now held by the caller. It is false only
+	// when a bounded wait expired before the lock became available.
+	bool acquired = 1;
+	// lock_key is the canonical key of the acquired lock (echoes name).
+	string lock_key = 2;
+	// fencing_token is the monotonic token proving this acquisition. Present it to
+	// Unlock. It strictly increases each time the lock changes hands.
+	uint64 fencing_token = 3;
+	// revision is the FSM logical clock at the moment of acquisition.
+	uint64 revision = 4;
+}
+
+message TryLockRequest {
+	// name is the lock key.
+	string name = 1;
+	// client_id is the acquiring session's identity. It must have a live lease.
+	string client_id = 2;
+}
+
+message TryLockResponse {
+	// acquired reports whether the lock was free and is now held by the caller.
+	bool acquired = 1;
+	// lock_key is the canonical key of the lock (echoes name).
+	string lock_key = 2;
+	// fencing_token is set only when acquired is true (see LockResponse).
+	uint64 fencing_token = 3;
+	// revision is the FSM logical clock at the moment of the attempt.
+	uint64 revision = 4;
+	// current_holder is the client_id currently holding the lock when acquired is
+	// false; empty otherwise.
+	string current_holder = 5;
+}
+
+message UnlockRequest {
+	// lock_key is the key returned by the acquisition.
+	string lock_key = 1;
+	// client_id is the holder's identity.
+	string client_id = 2;
+	// fencing_token is the token from the acquisition. A mismatch is rejected.
+	uint64 fencing_token = 3;
+}
+
+message UnlockResponse {
+	// revision is the FSM logical clock after the release is applied.
+	uint64 revision = 1;
+}
+
+message StatusRequest {
+	// name is the lock key.
+	string name = 1;
+	// read_mode selects linearizable (default) or stale read consistency.
+	ReadMode read_mode = 2;
+}
+
+message StatusResponse {
+	// held reports whether the lock currently has a holder.
+	bool held = 1;
+	// holder_client_id is the current holder's identity; empty when not held.
+	string holder_client_id = 2;
+	// fencing_token is the holder's current token; 0 when not held.
+	uint64 fencing_token = 3;
+	// queue_depth is the number of clients waiting behind the holder.
+	uint32 queue_depth = 4;
+	// revision is the FSM logical clock at which this status was read.
+	uint64 revision = 5;
+}
+
+// Election is leader election among clients for a named contest. It is built on
+// the same fenced, lease-bound FIFO primitive as Locker: the campaign winner is
+// "the leader," runners-up wait in arrival order, and a leader that loses its
+// lease is replaced by the next in line. RPC names mirror etcd's v3election so a
+// later wire-compatibility gateway is a thin mapping.
+service Election {
+	// Campaign enters the named election and blocks until the caller becomes
+	// leader (or the optional wait deadline passes). On success it returns the
+	// leader_key and fencing_token identifying this leadership term.
+	rpc Campaign(CampaignRequest) returns (CampaignResponse);
+	// Proclaim updates the value published by the current leader without giving up
+	// leadership. It requires the leadership fencing_token.
+	rpc Proclaim(ProclaimRequest) returns (ProclaimResponse);
+	// Leader returns the current leader's identity and published value, at the
+	// requested consistency.
+	rpc Leader(LeaderRequest) returns (LeaderResponse);
+	// Observe streams leadership changes for the named election: one event for the
+	// current leader, then one each time leadership or the published value changes.
+	rpc Observe(ObserveRequest) returns (stream LeaderEvent);
+	// Resign gives up leadership, promoting the next waiter. It requires the
+	// leadership fencing_token.
+	rpc Resign(ResignRequest) returns (ResignResponse);
+}
+
+message CampaignRequest {
+	// name is the election key.
+	string name = 1;
+	// client_id is the candidate's identity. It must have a live lease.
+	string client_id = 2;
+	// value is the payload published while this candidate leads (e.g. an address).
+	bytes value = 3;
+	// wait_deadline_unix_nano bounds the wait for leadership; 0 means block until
+	// elected or the RPC context ends.
+	int64 wait_deadline_unix_nano = 4;
+}
+
+message CampaignResponse {
+	// leadership reports whether the caller is now the leader. It is false only
+	// when a bounded wait expired first.
+	bool leadership = 1;
+	// leader_key is the canonical key of this leadership term (echoes name).
+	string leader_key = 2;
+	// fencing_token proves this leadership term; present it to Proclaim and Resign.
+	uint64 fencing_token = 3;
+	// revision is the FSM logical clock at the moment leadership was won.
+	uint64 revision = 4;
+}
+
+message ProclaimRequest {
+	// name is the election key.
+	string name = 1;
+	// client_id is the leader's identity.
+	string client_id = 2;
+	// fencing_token is the leadership token. A mismatch is rejected.
+	uint64 fencing_token = 3;
+	// value is the new payload to publish.
+	bytes value = 4;
+}
+
+message ProclaimResponse {
+	// revision is the FSM logical clock after the new value is applied.
+	uint64 revision = 1;
+}
+
+message LeaderRequest {
+	// name is the election key.
+	string name = 1;
+	// read_mode selects linearizable (default) or stale read consistency.
+	ReadMode read_mode = 2;
+}
+
+message LeaderResponse {
+	// has_leader reports whether the election currently has a leader.
+	bool has_leader = 1;
+	// leader_client_id is the current leader's identity; empty when leaderless.
+	string leader_client_id = 2;
+	// fencing_token is the current leadership token; 0 when leaderless.
+	uint64 fencing_token = 3;
+	// value is the leader's published payload.
+	bytes value = 4;
+	// revision is the FSM logical clock at which this was read.
+	uint64 revision = 5;
+}
+
+message ObserveRequest {
+	// name is the election key.
+	string name = 1;
+}
+
+message LeaderEvent {
+	// has_leader reports whether the election has a leader as of this event.
+	bool has_leader = 1;
+	// leader_client_id is the leader's identity as of this event; empty when
+	// leaderless.
+	string leader_client_id = 2;
+	// fencing_token is the leadership token as of this event; 0 when leaderless.
+	uint64 fencing_token = 3;
+	// value is the leader's published payload as of this event.
+	bytes value = 4;
+	// revision is the FSM logical clock at which this event was emitted.
+	uint64 revision = 5;
+}
+
+message ResignRequest {
+	// name is the election key.
+	string name = 1;
+	// client_id is the leader's identity.
+	string client_id = 2;
+	// fencing_token is the leadership token. A mismatch is rejected.
+	uint64 fencing_token = 3;
+}
+
+message ResignResponse {
+	// revision is the FSM logical clock after leadership is relinquished.
+	uint64 revision = 1;
+}
+
+// Endpoint is the network location a leader (master) publishes as its Election
+// value so observers can dial it by election path. It is not referenced by any
+// RPC: it is a data type marshaled into the free-form Election value bytes
+// (Campaign/Proclaim value; Leader/LeaderEvent value). Zuul does not interpret it.
+message Endpoint {
+	// host is the master's reachable address: a DNS hostname or an IP literal (IPv4
+	// or IPv6). Resolvers dial it as host:port, so "dns:port" endpoints work too.
+	string host = 1;
+	// port is the TCP port to dial on host.
+	uint32 port = 2;
+	// metadata is an optional caller-defined payload (any proto message) the master
+	// attaches to its address. Carried verbatim; Zuul does not interpret it.
+	google.protobuf.Any metadata = 3;
+}
+
+// Cluster is the administrative API for cluster membership and topology. These
+// calls operate on Zuul's own meta shard (the source of truth for which nodes
+// exist and how to reach them), not on user locks.
+service Cluster {
+	// Members lists the nodes currently in the cluster and their addresses.
+	rpc Members(MembersRequest) returns (MembersResponse);
+	// AddNode adds a node to the cluster across all shards (join). Used to admit a
+	// new node, or to re-admit a node that restarted on a fresh in-memory store.
+	rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
+	// RemoveNode removes a node from the cluster across all shards.
+	rpc RemoveNode(RemoveNodeRequest) returns (RemoveNodeResponse);
+	// Shards reports, per shard, which node leads it and the term — i.e. how
+	// leadership is spread across the cluster.
+	rpc Shards(ShardsRequest) returns (ShardsResponse);
+	// Health reports this node's view of its own health.
+	rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// Member describes one node in the cluster. Both addresses are carried because
+// Zuul runs two network planes: dragonboat's Raft transport and Zuul's own
+// client-facing gRPC. Forwarding a write to a shard's leader targets that node's
+// zuul_grpc_address.
+message Member {
+	// replica_id is the node's stable replica id within every shard.
+	uint64 replica_id = 1;
+	// node_host_id is dragonboat's NodeHostID (used in gossip addressing mode).
+	string node_host_id = 2;
+	// raft_address is the dragonboat Raft transport address (host:port).
+	string raft_address = 3;
+	// zuul_grpc_address is the node's client-facing Zuul gRPC address (host:port).
+	string zuul_grpc_address = 4;
+}
+
+message MembersRequest {}
+
+message MembersResponse {
+	// members is the current cluster membership.
+	repeated Member members = 1;
+}
+
+message AddNodeRequest {
+	// replica_id is the stable replica id to assign the joining node.
+	uint64 replica_id = 1;
+	// node_host_id is the joining node's dragonboat NodeHostID.
+	string node_host_id = 2;
+	// raft_address is the joining node's Raft transport address.
+	string raft_address = 3;
+	// zuul_grpc_address is the joining node's client-facing gRPC address.
+	string zuul_grpc_address = 4;
+}
+
+message AddNodeResponse {}
+
+message RemoveNodeRequest {
+	// replica_id is the replica id of the node to remove.
+	uint64 replica_id = 1;
+}
+
+message RemoveNodeResponse {}
+
+message ShardsRequest {}
+
+message ShardsResponse {
+	// shards is the per-shard leadership map as seen by this node.
+	repeated ShardInfo shards = 1;
+}
+
+message ShardInfo {
+	// shard_id is the Raft group id.
+	uint64 shard_id = 1;
+	// leader_replica_id is the replica id leading this shard; 0 if unknown.
+	uint64 leader_replica_id = 2;
+	// term is the Raft term of the current leadership.
+	uint64 term = 3;
+	// replica_ids lists every replica id participating in this shard.
+	repeated uint64 replica_ids = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+	// healthy is this node's self-assessment.
+	bool healthy = 1;
+	// shard_count is the number of shards this node participates in.
+	uint64 shard_count = 2;
+	// leader_count is the number of those shards this node currently leads.
+	uint64 leader_count = 3;
+}

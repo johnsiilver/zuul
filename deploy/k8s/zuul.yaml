@@ -1,0 +1,112 @@
+# A 3-node Zuul cluster on Kubernetes using StatefulSet + headless-Service DNS
+# discovery (zuuld --discovery k8s). No etcd-style external coordination is needed:
+# each pod derives its replica id from its ordinal and finds peers by stable DNS.
+#
+#   kubectl apply -f zuul.yaml
+#
+# Clients reach any node through the "zuul-client" Service on :8001.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zuul
+  labels:
+    app: zuul
+spec:
+  clusterIP: None # headless: gives each pod a stable DNS name for peer discovery
+  # REQUIRED for bootstrap: during initial formation no pod is Ready yet (readiness
+  # needs a quorum), so without this the peer DNS A-records are not published and the
+  # nodes cannot resolve each other to elect a leader — a deadlock. Publishing
+  # not-ready addresses lets them find each other and form the cluster.
+  publishNotReadyAddresses: true
+  selector:
+    app: zuul
+  ports:
+    - name: raft
+      port: 9001
+    - name: grpc
+      port: 8001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zuul-client
+  labels:
+    app: zuul
+spec:
+  selector:
+    app: zuul
+  ports:
+    - name: grpc
+      port: 8001
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zuul
+spec:
+  serviceName: zuul # must match the headless Service above
+  replicas: 3
+  # Parallel is REQUIRED for a quorum-based cluster: the default OrderedReady starts
+  # pods one at a time, waiting for each to be Ready first — but a node only becomes
+  # Ready (shards have leaders) once a quorum is up, so an ordered start deadlocks at
+  # pod 0. Parallel brings all pods up together so they can elect leaders.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: zuul
+  template:
+    metadata:
+      labels:
+        app: zuul
+    spec:
+      terminationGracePeriodSeconds: 30 # lets zuuld drain leadership on SIGTERM
+      containers:
+        - name: zuuld
+          image: zuul:latest # build with deploy/Dockerfile and push to your registry
+          args:
+            - "--discovery=k8s"
+            - "--k8s-name=zuul" # == StatefulSet name == headless Service name
+            - "--k8s-namespace=$(POD_NAMESPACE)"
+            - "--k8s-replicas=3" # keep in sync with .spec.replicas
+            - "--k8s-raft-port=9001"
+            - "--k8s-grpc-port=8001"
+            - "--shards=16"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # HOSTNAME (the pod name, e.g. zuul-0) is set by Kubernetes and is the
+            # default for --pod-name, from which zuuld derives this replica's id.
+          ports:
+            - name: raft
+              containerPort: 9001
+            - name: grpc
+              containerPort: 8001
+          # zuuld serves the standard grpc.health.v1 service: readiness reports
+          # SERVING only once every shard has a leader, and flips to NOT_SERVING
+          # while draining — so rollouts gate traffic correctly. (gRPC probes need
+          # Kubernetes >= 1.24.)
+          #
+          # The gRPC listener only opens after the node forms a cluster and elects
+          # leaders, so a startupProbe gives that bootstrap window (up to ~60s) before
+          # liveness can act — otherwise liveness would kill the pod mid-election.
+          startupProbe:
+            grpc:
+              port: 8001
+            periodSeconds: 3
+            failureThreshold: 20 # ~60s to come up
+          readinessProbe:
+            grpc:
+              port: 8001
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"

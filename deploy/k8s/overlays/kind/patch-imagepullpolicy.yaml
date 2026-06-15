@@ -1,0 +1,10 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zuul
+spec:
+  template:
+    spec:
+      containers:
+        - name: zuuld
+          imagePullPolicy: IfNotPresent
