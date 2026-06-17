@@ -207,27 +207,6 @@ The same limit guards the node-to-node forward plane, so set it consistently on 
 node. (Dragonboat's Raft entry cap of 64 MiB sits well above this, so gRPC is the
 binding limit.)
 
-## Architecture
-
-- **Multi-group sharded Raft** over [`dragonboat`](https://github.com/lni/dragonboat)
-  (rehomed into `internal/dragonboat`, audited, patched for IPv6/`net/netip`, cgo
-  removed). `shardID = xxhash64(key) % M`; each shard is a Raft group replicated on
-  every node.
-- **Per-shard FSM** (`internal/fsm`) — pure, deterministic, exhaustively tested: locks,
-  FIFO queues, fencing tokens, and lease grant/keepalive/expire. Time is leader-stamped
-  into commands so apply stays identical on every replica.
-- **Writes** propose on the shard's leader — local if this node leads it, else proxied
-  over the node-to-node **forward plane** (`internal/forward`) with exponential-backoff
-  retry through leader churn. **Reads** run linearizably (ReadIndex) on any node.
-- **Meta shard** (`internal/meta`) — a small replicated topology map (replica id →
-  addresses) so any node can resolve a leader's address, including for nodes added at
-  runtime. Backs the `Cluster` admin API and dynamic membership.
-- **Sessions** (`internal/session`) — per-client, per-shard leases created lazily;
-  one heartbeat fans renewals out to the shards a client actually touches.
-- **Two protobuf transport planes**: dragonboat's Raft replication (framed TCP, `raftpb`)
-  and Zuul's forward plane (gRPC, vtproto-marshaled `fsmpb`/`metapb` bytes). The
-  client-facing API is a third gRPC plane (`proto/zuul/v1`). All three support mutual TLS.
-
 ## Status
 
 Working and tested end-to-end (in-process multi-node clusters): forwarded writes,
@@ -238,10 +217,6 @@ client provably rejected), and both **static and gossip (NodeHostID)** addressin
 Ships a Go client, the `zuuld` server, and a `zuulctl` admin CLI. Single-node
 benchmarks (Apple M1 Max): acquire+release ≈ 25 µs/op, linearizable read ≈ 2.7 µs/op.
 
-**Not yet:** OTEL telemetry and an etcd v3 wire-compatibility gateway. See
-`PRP/projectplan-zuul.md` for the full design and roadmap, and
-`PRP/security-audit-dragonboat.md` for the dependency audit.
-
 ## Layout
 
 ```
@@ -249,11 +224,4 @@ client/                Go client library (Client, Mutex, Election, Master dialin
 cmd/zuuld/             the server binary
 examples/quickstart/   embedded single-node demo
 proto/zuul/v1/         client-facing gRPC API (Locker/Session/Election/Cluster)
-internal/
-  fsm/        per-shard replicated state machine (the correctness heart)
-  consensus/  dragonboat host: shards, propose/read, membership, expiry
-  forward/    node-to-node forward-to-leader plane
-  meta/       topology (meta) shard
-  router/ session/ watch/ server/ node/ zuultls/   supporting layers
-  dragonboat/ rehomed + audited Raft engine
 ```
