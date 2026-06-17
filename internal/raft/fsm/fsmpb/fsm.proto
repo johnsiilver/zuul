@@ -1,0 +1,259 @@
+syntax = "proto3";
+
+// Package zuul.fsm is Zuul's internal replicated-state-machine wire format: the
+// commands a shard leader proposes into the Raft log, the result the state
+// machine returns from applying one, and the full-shard snapshot used for log
+// compaction and replica catch-up. It is an implementation detail of the
+// consensus core, not a client API, and is marshalled with vtprotobuf on the hot
+// path.
+//
+// Determinism rule: applying a command must be a pure function of the command
+// bytes and current state, identical on every replica. Anything time-dependent
+// is therefore stamped by the proposing leader into the command (the *_unix_nano
+// fields) rather than read from the local clock during apply.
+package zuul.fsm;
+
+option go_package = "github.com/johnsiilver/zuul/internal/raft/fsm/fsmpb;fsmpb";
+
+// Command is one Raft log entry: exactly one of the inner commands is set.
+message Command {
+	oneof cmd {
+		AcquireLock acquire_lock = 1;
+		ReleaseLock release_lock = 2;
+		CancelWait cancel_wait = 3;
+		LeaseGrant lease_grant = 4;
+		LeaseKeepAlive lease_keep_alive = 5;
+		LeaseRevoke lease_revoke = 6;
+		LeaseExpire lease_expire = 7;
+		Campaign campaign = 8;
+		Proclaim proclaim = 9;
+		Resign resign = 10;
+	}
+}
+
+// AcquireLock requests the named lock for a client. If the lock is free it is
+// granted with a fresh fencing token; if held and try_lock is false the client
+// is appended to the FIFO queue (Outcome QUEUED); if held and try_lock is true
+// the command is a no-op acquire (Outcome NOT_ACQUIRED). A re-applied acquire by
+// the current holder is an idempotent GRANTED with the existing token.
+message AcquireLock {
+	// name is the lock key.
+	string name = 1;
+	// client_id is the acquiring client; it must hold a live lease in this shard.
+	string client_id = 2;
+	// try_lock, when true, forbids enqueueing: acquire-or-fail, never wait.
+	bool try_lock = 3;
+}
+
+// ReleaseLock releases a held lock and promotes the head of its FIFO queue (which
+// receives a new fencing token). The token must match the holder's current token.
+message ReleaseLock {
+	// name is the lock key.
+	string name = 1;
+	// client_id is the releasing holder.
+	string client_id = 2;
+	// fencing_token is the holder's token; a mismatch yields Outcome STALE_TOKEN.
+	uint64 fencing_token = 3;
+}
+
+// CancelWait removes a client from a lock's FIFO queue without acquiring it. The
+// server proposes it when a bounded-wait acquire times out, so abandoned waiters
+// never block the line. A no-op (Outcome NOOP) if the client is not queued.
+message CancelWait {
+	// name is the lock key.
+	string name = 1;
+	// client_id is the waiter to remove.
+	string client_id = 2;
+}
+
+// LeaseGrant creates (or, idempotently, refreshes) a client's lease in this shard.
+message LeaseGrant {
+	// client_id is the lease owner.
+	string client_id = 1;
+	// ttl_ms is the lease duration in milliseconds; stored to recompute renewals.
+	int64 ttl_ms = 2;
+	// now_unix_nano is the leader's apply-time clock anchor; expiry is now + ttl.
+	int64 now_unix_nano = 3;
+}
+
+// LeaseKeepAlive extends a lease's expiry to now + ttl using the lease's stored
+// ttl. A no-op (Outcome NOT_FOUND) if the lease does not exist.
+message LeaseKeepAlive {
+	// client_id is the lease owner.
+	string client_id = 1;
+	// now_unix_nano is the leader's apply-time clock anchor.
+	int64 now_unix_nano = 2;
+}
+
+// LeaseRevoke removes a lease immediately, releasing every lock the client holds
+// and promoting the next waiter on each.
+message LeaseRevoke {
+	// client_id is the lease owner.
+	string client_id = 1;
+}
+
+// LeaseExpire is proposed only by the shard leader's expiry ticker when a lease
+// is due. The state machine re-checks the deadline against now_unix_nano and
+// only expires if the lease is still past due (a NOOP otherwise), so it is safe
+// against a keepalive that committed after the expire was proposed.
+message LeaseExpire {
+	// client_id is the lease owner to expire.
+	string client_id = 1;
+	// now_unix_nano is the leader's apply-time clock anchor for the due check.
+	int64 now_unix_nano = 2;
+}
+
+// Campaign enters a named election: a fenced, lease-bound FIFO contest. Free key
+// makes the client leader (GRANTED) with a fresh token and the published value;
+// otherwise the client is enqueued (QUEUED) and promoted in arrival order.
+message Campaign {
+	// name is the election key.
+	string name = 1;
+	// client_id is the candidate; it must hold a live lease in this shard.
+	string client_id = 2;
+	// value is the payload published while this client leads.
+	bytes value = 3;
+}
+
+// Proclaim updates the leader's published value without changing leadership. The
+// token must match the current leader's token.
+message Proclaim {
+	// name is the election key.
+	string name = 1;
+	// client_id is the current leader.
+	string client_id = 2;
+	// fencing_token is the leadership token; a mismatch yields STALE_TOKEN.
+	uint64 fencing_token = 3;
+	// value is the new payload to publish.
+	bytes value = 4;
+}
+
+// Resign relinquishes leadership and promotes the next candidate. The token must
+// match the current leader's token.
+message Resign {
+	// name is the election key.
+	string name = 1;
+	// client_id is the resigning leader.
+	string client_id = 2;
+	// fencing_token is the leadership token; a mismatch yields STALE_TOKEN.
+	uint64 fencing_token = 3;
+}
+
+// Outcome is the deterministic, replicated result classification of applying a
+// command. It is identical on every replica.
+enum Outcome {
+	// OUTCOME_UNKNOWN is the unset zero value and never returned by a valid apply.
+	OUTCOME_UNKNOWN = 0;
+	// OUTCOME_GRANTED: the lock/leadership was granted to the client (fencing_token
+	// is set). Also returned for an idempotent re-grant to the current holder.
+	OUTCOME_GRANTED = 1;
+	// OUTCOME_QUEUED: the client was appended to the FIFO queue (queue_position set).
+	OUTCOME_QUEUED = 2;
+	// OUTCOME_NOT_ACQUIRED: a try-lock found the lock held (current_holder set).
+	OUTCOME_NOT_ACQUIRED = 3;
+	// OUTCOME_RELEASED: the lock/leadership was released; a waiter may have been
+	// promoted.
+	OUTCOME_RELEASED = 4;
+	// OUTCOME_NOT_HOLDER: the client does not hold the lock/leadership it acted on.
+	OUTCOME_NOT_HOLDER = 5;
+	// OUTCOME_STALE_TOKEN: the presented fencing_token did not match the holder's.
+	OUTCOME_STALE_TOKEN = 6;
+	// OUTCOME_NO_LEASE: the client has no live lease in this shard.
+	OUTCOME_NO_LEASE = 7;
+	// OUTCOME_LEASE_GRANTED: a lease was created or refreshed (lease_deadline set).
+	OUTCOME_LEASE_GRANTED = 8;
+	// OUTCOME_LEASE_RENEWED: an existing lease's deadline was extended.
+	OUTCOME_LEASE_RENEWED = 9;
+	// OUTCOME_LEASE_REVOKED: a lease was revoked and its locks released.
+	OUTCOME_LEASE_REVOKED = 10;
+	// OUTCOME_LEASE_EXPIRED: a due lease was expired and its locks released.
+	OUTCOME_LEASE_EXPIRED = 11;
+	// OUTCOME_VALUE_UPDATED: a leader's published value was updated (Proclaim).
+	OUTCOME_VALUE_UPDATED = 12;
+	// OUTCOME_NOT_FOUND: the target lock/lease did not exist.
+	OUTCOME_NOT_FOUND = 13;
+	// OUTCOME_NOOP: the command was valid but changed nothing (e.g. a CancelWait for
+	// a client not queued, or a LeaseExpire no longer past due).
+	OUTCOME_NOOP = 14;
+}
+
+// CommandResult is what applying a Command returns. It is carried back to the
+// proposing call so it can answer the client synchronously.
+message CommandResult {
+	// outcome classifies what happened.
+	Outcome outcome = 1;
+	// revision is the FSM logical clock after this command was applied.
+	uint64 revision = 2;
+	// fencing_token is the granted/holder token when relevant (GRANTED); else 0.
+	uint64 fencing_token = 3;
+	// lock_key echoes the affected key (lock or election name).
+	string lock_key = 4;
+	// queue_position is the 1-based place in line on QUEUED; 0 otherwise.
+	uint32 queue_position = 5;
+	// current_holder is the holder's client_id on NOT_ACQUIRED; empty otherwise.
+	string current_holder = 6;
+	// lease_deadline_unix_nano is the new lease deadline on lease outcomes; else 0.
+	int64 lease_deadline_unix_nano = 7;
+	// value is the leader's published value when relevant (election outcomes).
+	bytes value = 8;
+}
+
+// Snapshot is the entire state of one shard's FSM, marshalled for SaveSnapshot
+// and reloaded by RecoverFromSnapshot. It exists for log compaction and for
+// catching up a restarted or lagging replica — never for cross-restart durability
+// (the whole store is in memory).
+message Snapshot {
+	// seq is the monotonic counter backing fencing tokens and waiter ordering.
+	uint64 seq = 1;
+	// revision is the FSM logical clock (bumped per applied write).
+	uint64 revision = 2;
+	// locks is every lock/election with a holder or a non-empty queue.
+	repeated LockState locks = 3;
+	// leases is every live lease in this shard.
+	repeated LeaseState leases = 4;
+}
+
+// LockState is the persisted state of one lock or election key.
+message LockState {
+	// name is the lock/election key.
+	string name = 1;
+	// holder is the current owner; unset when the key is free but has waiters.
+	Owner holder = 2;
+	// token is the holder's current fencing token.
+	uint64 token = 3;
+	// value is the leader's published payload for an election; nil for plain locks.
+	bytes value = 4;
+	// queue is the FIFO of waiters, ordered by enqueue_seq.
+	repeated Waiter queue = 5;
+}
+
+// Owner identifies the holder of a lock or the leader of an election.
+message Owner {
+	// client_id is the owning client (also its lease key in this shard).
+	string client_id = 1;
+}
+
+// Waiter is one entry in a lock/election FIFO queue.
+message Waiter {
+	// client_id is the waiting client.
+	string client_id = 1;
+	// enqueue_seq is the seq assigned when the client joined the queue; it defines
+	// FIFO order and is stable across promotions.
+	uint64 enqueue_seq = 2;
+	// value is the payload to publish if this waiter is an election candidate.
+	bytes value = 3;
+}
+
+// LeaseState is one client's lease within this shard.
+message LeaseState {
+	// client_id is the lease owner.
+	string client_id = 1;
+	// ttl_ms is the lease duration used to recompute the deadline on keepalive.
+	int64 ttl_ms = 2;
+	// expire_at_unix_nano is the absolute deadline; the leader expires the lease
+	// once its clock passes this.
+	int64 expire_at_unix_nano = 3;
+	// held_keys is the set of lock/election keys this client currently holds, so
+	// expiry can release them all.
+	repeated string held_keys = 4;
+}

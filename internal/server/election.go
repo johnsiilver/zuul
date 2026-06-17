@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/errors"
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/cmd"
-	"github.com/johnsiilver/zuul/internal/fsm"
-	"github.com/johnsiilver/zuul/internal/fsm/fsmpb"
-	"github.com/johnsiilver/zuul/internal/watch"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/lock/watch"
+	"github.com/johnsiilver/zuul/internal/raft/cmd"
+	"github.com/johnsiilver/zuul/internal/raft/fsm"
+	"github.com/johnsiilver/zuul/internal/raft/fsm/fsmpb"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
 
@@ -33,7 +33,9 @@ func (s *Server) Campaign(ctx context.Context, req *zuulv1.CampaignRequest) (*zu
 		return nil, sessionErr(ctx, err)
 	}
 
-	sub := s.cfg.Hub.Subscribe(req.GetName())
+	// A campaigner is a contender, not an observer (Track false): it is reported from
+	// the FSM wait-queue, not the hub.
+	sub := s.cfg.Hub.Subscribe(watch.SubArgs{Key: req.GetName()})
 	defer sub.Close()
 
 	res, err := s.propose(ctx, shardID, cmd.Campaign(req.GetName(), req.GetClientId(), req.GetValue()))
@@ -164,8 +166,10 @@ func (s *Server) Observe(req *zuulv1.ObserveRequest, stream zuulv1.Election_Obse
 	}
 	shardID := s.cfg.Router.Shard(req.GetName())
 
-	// Subscribe before reading the current state so no change is missed.
-	sub := s.cfg.Hub.Subscribe(req.GetName())
+	// Subscribe before reading the current state so no change is missed. An Observe
+	// stream is a tracked observer: record its identity so it appears in the browse UI.
+	identity, _ := context.IdentityFromContext(ctx)
+	sub := s.cfg.Hub.Subscribe(watch.SubArgs{Key: req.GetName(), Identity: identity, Track: true})
 	defer sub.Close()
 
 	st, err := s.readStatus(ctx, shardID, req.GetName(), zuulv1.ReadMode_READ_MODE_LINEARIZABLE)

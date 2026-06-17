@@ -13,7 +13,7 @@ import (
 
 	"sync/atomic"
 
-	"github.com/gostdlib/base/context"
+	"github.com/gostdlib/base/concurrency/sync"
 	"github.com/gostdlib/base/retry/exponential"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -21,17 +21,20 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
+	"github.com/johnsiilver/zuul/context"
+
 	"github.com/johnsiilver/zuul/errors"
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/consensus"
-	"github.com/johnsiilver/zuul/internal/forward"
-	"github.com/johnsiilver/zuul/internal/oidcauth"
-	"github.com/johnsiilver/zuul/internal/router"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/auth/oidcauth"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls"
+	"github.com/johnsiilver/zuul/internal/cluster/router"
+	"github.com/johnsiilver/zuul/internal/lock/session"
+	"github.com/johnsiilver/zuul/internal/lock/watch"
+	"github.com/johnsiilver/zuul/internal/otel/tracing"
+	"github.com/johnsiilver/zuul/internal/raft/consensus"
+	"github.com/johnsiilver/zuul/internal/raft/forward"
 	"github.com/johnsiilver/zuul/internal/server"
-	"github.com/johnsiilver/zuul/internal/session"
-	"github.com/johnsiilver/zuul/internal/tracing"
-	"github.com/johnsiilver/zuul/internal/watch"
-	"github.com/johnsiilver/zuul/internal/zuultls"
+	"github.com/johnsiilver/zuul/internal/ui"
 )
 
 // Config configures one node.
@@ -131,13 +134,22 @@ type Config struct {
 	// Default "sub"; Azure deployments often want "oid".
 	OIDCIdentityClaim string
 	// SnapshotEntries is how many Raft log entries trigger a snapshot (compaction);
-	// 0 means the default (10000).
+	// 0 means the default (1000). The log is held in RAM, so this bounds LogDB memory.
 	SnapshotEntries uint64
 	// CompactionOverhead is how many entries are retained after compaction;
 	// 0 means the default (100).
 	CompactionOverhead uint64
 	// Authorizer gates key operations by mTLS identity; nil means allow all.
 	Authorizer authz.Authorizer
+	// UIEnable serves the optional read-only browsing web UI on UIBind. Off by default.
+	UIEnable bool
+	// UIBind is the UI HTTP listener address (e.g. "127.0.0.1:9999"). Required when
+	// UIEnable. The UI has no authentication of its own — bind it to localhost or front
+	// it with TLS.
+	UIBind string
+	// UITLS serves the UI over the node's server TLS (reuses CAFile/CertFile/KeyFile).
+	// When false (the default) the UI is plaintext.
+	UITLS bool
 }
 
 // Node is an assembled, ready-to-serve Zuul node.
@@ -146,14 +158,18 @@ type Node struct {
 	disp           *forward.Dispatcher
 	srv            *server.Server
 	clusterSrv     *server.ClusterServer
+	browse         *server.BrowseServer
+	ui             *ui.Server // nil when the UI is disabled
 	sessions       *session.Manager
 	gs             *grpc.Server
 	health         *health.Server
 	now            func() int64
 	expiryInterval time.Duration
 	draining       atomic.Bool
-	closing        atomic.Bool        // guards shutdown so Close/Stop are idempotent in any order
-	cancel         context.CancelFunc // stops the background tasks started by Start; set by Start, called by Close/Stop
+	closing        atomic.Bool // guards shutdown so Close/Stop are idempotent in any order
+
+	mu     sync.Mutex
+	cancel context.CancelFunc // guarded by mu; stops Start's background tasks, called by Close/Stop
 }
 
 // bearerEnabled reports whether any bearer-token authentication is configured.
@@ -181,6 +197,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("node.Config: OIDCIssuer and OIDCAudience must be set together")
 	case c.bearerEnabled() && !c.MutualTLS && !c.ServerTLS:
 		return fmt.Errorf("node.Config: bearer-token auth (Tokens/OIDC) requires MutualTLS or ServerTLS — on a plaintext listener the inter-node forward plane (exempt from token auth) lets any client bypass authentication")
+	case c.UIEnable && c.UIBind == "":
+		return fmt.Errorf("node.Config: UIEnable requires UIBind")
+	case c.UITLS && c.CertFile == "":
+		return fmt.Errorf("node.Config: UITLS requires the server TLS certificate (CAFile/CertFile/KeyFile)")
 	}
 	// A restrictive Authorizer without an authenticating method is permitted: the
 	// caller supplies its principal via the unauthenticated zuul-user header. That is
@@ -254,13 +274,13 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 		Notifier: hub,
 	})
 	if err != nil {
-		return nil, err
+		return nil, errors.E(ctx, errors.CatInternal, errors.TypeConsensus, fmt.Errorf("node.New: consensus host: %w", err))
 	}
 
 	serverOpts, dialOpts, err := tlsOptions(cfg)
 	if err != nil {
 		host.Close()
-		return nil, err
+		return nil, errors.E(ctx, errors.CatRequest, errors.TypeConfig, fmt.Errorf("node.New: tls: %w", err))
 	}
 
 	// peerCA / peerCNs distinguish node certificates from client certificates on the
@@ -295,7 +315,7 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	// the trace context to the leader node.
 	serverOpts = append(serverOpts, baseHardening(cfg)...)
 	gate := &authGate{
-		bearer:    &bearerAuth{tokens: cfg.Tokens, oidc: oidcV},
+		bearer:    &bearerAuth{tokens: hashTokens(cfg.Tokens), oidc: oidcV},
 		guardPeer: cfg.MutualTLS || cfg.ServerTLS,
 		peerCA:    peerCA,
 		peerCNs:   peerCNs,
@@ -331,10 +351,42 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	}
 	clusterSrv := server.NewClusterServer(server.ClusterConfig{Host: host, Members: disp, Proposer: disp, MetaShardID: cfg.MetaShardID, Authorizer: cfg.Authorizer})
 
+	// Read-only browse API: enumerate locks/elections (fan-out across local shards) and
+	// aggregate observers cluster-wide (local hub + peer fan-out over the dispatcher).
+	observers := server.NewObserverAggregator(hub, host, disp)
+	browseSrv, err := server.NewBrowseServer(server.BrowseConfig{Router: r, Reader: host, Observers: observers, Authorizer: cfg.Authorizer})
+	if err != nil {
+		disp.Close()
+		host.Close()
+		return nil, errors.E(ctx, errors.CatInternal, errors.TypeConfig, fmt.Errorf("node.New: browse server: %w", err))
+	}
+
 	gs := grpc.NewServer(serverOpts...)
-	forward.NewServer(host).Register(gs)
+	forward.NewServer(host, hub).Register(gs)
 	srv.Register(gs)
 	clusterSrv.Register(gs)
+	browseSrv.Register(gs)
+
+	// Optional embedded web UI, calling the browse handlers in-process.
+	var uiSrv *ui.Server
+	if cfg.UIEnable {
+		uiCfg := ui.Config{Bind: cfg.UIBind, Browser: browseSrv}
+		if cfg.UITLS {
+			tc, err := zuultls.ServerOneWayConfig(cfg.CAFile, cfg.CertFile, cfg.KeyFile)
+			if err != nil {
+				disp.Close()
+				host.Close()
+				return nil, errors.E(ctx, errors.CatRequest, errors.TypeConfig, fmt.Errorf("node.New: ui tls: %w", err))
+			}
+			uiCfg.TLS = tc
+		}
+		uiSrv, err = ui.New(ctx, uiCfg)
+		if err != nil {
+			disp.Close()
+			host.Close()
+			return nil, errors.E(ctx, errors.CatRequest, errors.TypeConfig, fmt.Errorf("node.New: ui: %w", err))
+		}
+	}
 
 	// Standard gRPC health service: NOT_SERVING until Start observes the shards
 	// ready, so a k8s gRPC readiness probe gates traffic correctly during rollouts.
@@ -342,7 +394,7 @@ func New(ctx context.Context, cfg Config) (*Node, error) {
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 	healthpb.RegisterHealthServer(gs, hs)
 
-	return &Node{host: host, disp: disp, srv: srv, clusterSrv: clusterSrv, sessions: sessions, gs: gs, health: hs, now: now, expiryInterval: interval}, nil
+	return &Node{host: host, disp: disp, srv: srv, clusterSrv: clusterSrv, browse: browseSrv, ui: uiSrv, sessions: sessions, gs: gs, health: hs, now: now, expiryInterval: interval}, nil
 }
 
 // Start records this node in the meta shard (best effort; retried by clients/admin
@@ -355,13 +407,58 @@ func (n *Node) Start(ctx context.Context) error {
 	// Without this, announceSelf keeps retrying WriteSelf against the closed
 	// dispatcher forever after Close, and the watcher/expiry goroutines leak.
 	tctx, cancel := context.WithCancel(ctx)
-	n.cancel = cancel
+	n.setCancel(cancel)
 	n.announceSelf(tctx)
-	if err := n.host.RunExpiry(tctx, n.expiryInterval, n.now); err != nil {
-		return errors.E(tctx, errors.CatInternal, errors.TypeBackend, fmt.Errorf("node.Start: expiry sweep: %w", err))
+	steps := []startStep{
+		{name: "expiry sweep", run: func(c context.Context) error { return n.host.RunExpiry(c, n.expiryInterval, n.now) }},
+		{name: "health watcher", run: n.runHealthWatcher},
+		{name: "ui", run: n.startUI},
 	}
-	if err := n.runHealthWatcher(tctx); err != nil {
-		return errors.E(tctx, errors.CatInternal, errors.TypeBackend, fmt.Errorf("node.Start: health watcher: %w", err))
+	return runStartSteps(tctx, cancel, steps)
+}
+
+// startUI begins serving the embedded web UI, if it is enabled. It is a no-op when the
+// UI is disabled.
+func (n *Node) startUI(ctx context.Context) error {
+	if n.ui == nil {
+		return nil
+	}
+	return n.ui.Start(ctx)
+}
+
+// setCancel stores the cancel for Start's background tasks. Guarded so a concurrent
+// Close (which reads it) cannot race the write.
+func (n *Node) setCancel(cancel context.CancelFunc) {
+	n.mu.Lock()
+	n.cancel = cancel
+	n.mu.Unlock()
+}
+
+// cancelTasks stops the background tasks Start began, if any. Safe to call before Start.
+func (n *Node) cancelTasks() {
+	n.mu.Lock()
+	cancel := n.cancel
+	n.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// startStep is one named background task Start brings up.
+type startStep struct {
+	name string
+	run  func(context.Context) error
+}
+
+// runStartSteps runs each step under ctx. On the first failure it calls cancel so no
+// already-started background work (announceSelf, an earlier step) is left running on a
+// context that would otherwise never be cancelled, then returns the wrapped error.
+func runStartSteps(ctx context.Context, cancel context.CancelFunc, steps []startStep) error {
+	for _, s := range steps {
+		if err := s.run(ctx); err != nil {
+			cancel()
+			return errors.E(ctx, errors.CatInternal, errors.TypeBackend, fmt.Errorf("node.Start: %s: %w", s.name, err))
+		}
 	}
 	return nil
 }
@@ -371,22 +468,23 @@ func (n *Node) Start(ctx context.Context) error {
 // reachable yet (peers are booting in parallel); a single attempt would leave this
 // node permanently missing from the cluster topology even though it serves fine.
 func (n *Node) announceSelf(ctx context.Context) {
-	context.Pool(ctx).Submit(ctx, func() {
+	task := func(ctx context.Context) error {
 		boff, err := exponential.New()
 		if err != nil {
-			context.Log(ctx).Error("node: announce backoff init failed", "err", err.Error())
-			return
+			return errors.E(ctx, errors.CatInternal, errors.TypeBackend, fmt.Errorf("node: announce backoff init: %w", err))
 		}
-		err = boff.Retry(ctx, func(ctx context.Context, _ exponential.Record) error {
+		return boff.Retry(ctx, func(ctx context.Context, _ exponential.Record) error {
 			if err := n.host.WriteSelf(ctx, n.disp); err != nil {
 				return errors.E(ctx, errors.CatUnavailable, errors.TypeConsensus, fmt.Errorf("node: recording self in meta shard: %w", err))
 			}
 			return nil
 		})
-		if err != nil {
-			context.Log(ctx).Warn("node: recording self in meta shard ultimately failed", "err", err.Error())
-		}
-	})
+	}
+	// One-shot out-of-band work: Tasks.Once runs it on the background manager and logs a
+	// non-nil return, so a persistent failure is visible without a raw goroutine.
+	if err := context.Tasks(ctx).Once(ctx, "announce-self", task); err != nil {
+		context.Log(ctx).Error("node: scheduling announce-self failed", "err", err.Error())
+	}
 }
 
 // runHealthWatcher keeps the gRPC health status in sync with the node's readiness
@@ -438,6 +536,11 @@ func (n *Node) ClusterServer() *server.ClusterServer {
 	return n.clusterSrv
 }
 
+// Browse exposes the read-only browse service handler (see Server).
+func (n *Node) Browse() *server.BrowseServer {
+	return n.browse
+}
+
 // Sessions exposes the node's session (lease) manager; for embedding and tests.
 func (n *Node) Sessions() *session.Manager {
 	return n.sessions
@@ -453,8 +556,9 @@ func (n *Node) Drain(ctx context.Context) {
 	n.host.Drain(ctx)
 }
 
-// Close gracefully stops serving — waiting for in-flight RPCs to finish — and shuts
-// the consensus host down. Idempotent; safe to call after Stop.
+// Close gracefully stops serving — waiting up to gracefulStopWindow for in-flight RPCs to
+// finish, then forcing the rest closed so long-lived client streams cannot block shutdown
+// — and shuts the consensus host down. Idempotent; safe to call after Stop.
 func (n *Node) Close() {
 	n.shutdown(true)
 }
@@ -466,24 +570,55 @@ func (n *Node) Stop() {
 	n.shutdown(false)
 }
 
-// shutdown cancels the background tasks, stops the gRPC server (gracefully when
-// graceful is set, abruptly otherwise), then closes the dispatcher and host. The
+// gracefulStopWindow bounds how long a graceful shutdown waits for in-flight RPCs to drain
+// before it forces open connections closed. The client keepalive and election-observe
+// streams are long-lived and never end on their own, so an unbounded GracefulStop would
+// block shutdown forever (the process would only exit on an external SIGKILL). Leadership
+// has already moved on via Drain, so this only bounds the wait for client RPCs to finish.
+const gracefulStopWindow = 5 * time.Second
+
+// shutdown cancels the background tasks, stops the gRPC server (a bounded graceful stop
+// when graceful is set, abruptly otherwise), then closes the dispatcher and host. The
 // closing guard makes Close/Stop a no-op once shutdown has begun.
 func (n *Node) shutdown(graceful bool) {
 	if !n.closing.CompareAndSwap(false, true) {
 		return
 	}
-	if n.cancel != nil {
-		n.cancel() // stop announceSelf/expiry/health-watcher before tearing down their deps
+	n.cancelTasks() // stop announceSelf/expiry/health-watcher before tearing down their deps
+	if n.ui != nil {
+		uctx, cancel := context.WithTimeout(context.Background(), gracefulStopWindow)
+		_ = n.ui.Close(uctx)
+		cancel()
 	}
 	switch {
 	case graceful:
-		n.gs.GracefulStop()
+		n.gracefulStop(gracefulStopWindow)
 	default:
 		n.gs.Stop()
 	}
 	n.disp.Close()
 	n.host.Close()
+}
+
+// gracefulStop waits up to window for in-flight RPCs to finish, then forces open
+// connections closed so long-lived client streams cannot block shutdown forever. gRPC's
+// GracefulStop has no timeout of its own; we run it on the worker pool, race it against a
+// timer, and call Stop on expiry — Stop makes a pending GracefulStop return.
+func (n *Node) gracefulStop(window time.Duration) {
+	ctx := context.Background()
+	done := make(chan struct{})
+	context.Pool(ctx).Submit(ctx, func() {
+		n.gs.GracefulStop()
+		close(done)
+	})
+	t := time.NewTimer(window)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		n.gs.Stop() // force in-flight (long-lived client) streams closed
+		<-done
+	}
 }
 
 // tlsOptions builds the gRPC server and peer-dial credentials from cfg.

@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 )
 
 // TestRateLimitUnary proves the unary interceptor admits up to the burst then rejects

@@ -2,11 +2,13 @@ package node
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/gostdlib/base/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -15,12 +17,15 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/johnsiilver/zuul/context"
+
 	"github.com/johnsiilver/zuul/client"
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/forward/forwardpb"
-	"github.com/johnsiilver/zuul/internal/oidcauth/oidctest"
-	"github.com/johnsiilver/zuul/internal/zuultls"
-	"github.com/johnsiilver/zuul/internal/zuultls/zuultlstest"
+	"github.com/johnsiilver/zuul/errors"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/auth/oidcauth/oidctest"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls/zuultlstest"
+	"github.com/johnsiilver/zuul/internal/raft/forward/forwardpb"
 )
 
 // TestNodeHealth boots a real single node through the full assembly (hardening,
@@ -178,7 +183,8 @@ func TestTokenAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestTokenAuth: client TLS: %s", err)
 	}
-	creds := grpc.WithTransportCredentials(credentials.NewTLS(clientTLS))
+	tc := credentials.NewTLS(clientTLS)
+	creds := grpc.WithTransportCredentials(tc)
 
 	// Health stays exempt (probes carry TLS but no token).
 	conn, err := grpc.NewClient(grpcAddr, creds)
@@ -193,13 +199,13 @@ func TestTokenAuth(t *testing.T) {
 	// A tokenless client (valid TLS) cannot open a session.
 	dialCtx, cancelDial := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelDial()
-	if bad, err := client.New(dialCtx, client.Endpoints{grpcAddr}, client.WithClientID("intruder"), client.WithDialOptions(creds)); err == nil {
+	if bad, err := client.New(dialCtx, client.Endpoints{grpcAddr}, client.WithClientID("intruder"), client.WithTransportCredentials(tc)); err == nil {
 		_ = bad.Close()
 		t.Errorf("TestTokenAuth: tokenless client connected, want Unauthenticated")
 	}
 
 	// A token-bearing client works, and its token identity drives authz.
-	cl, err := client.New(ctx, client.Endpoints{grpcAddr}, client.WithClientID("good"), client.WithAuthToken("sekrit"), client.WithDialOptions(creds))
+	cl, err := client.New(ctx, client.Endpoints{grpcAddr}, client.WithClientID("good"), client.WithAuthToken("sekrit"), client.WithTransportCredentials(tc))
 	if err != nil {
 		t.Fatalf("TestTokenAuth: token client Dial: %s", err)
 	}
@@ -271,13 +277,14 @@ func TestServerTLSOIDC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestServerTLSOIDC: roots config: %s", err)
 	}
-	creds := grpc.WithTransportCredentials(credentials.NewTLS(rootsTLS))
+	tc := credentials.NewTLS(rootsTLS)
+	creds := grpc.WithTransportCredentials(tc)
 
 	// A token-bearing client works; its OIDC sub claim is the authz identity.
 	source := func(context.Context) (string, error) {
 		return issuer.Sign(map[string]any{"aud": "api://zuul", "sub": "orders-svc"})
 	}
-	cl, err := client.New(ctx, client.Endpoints{grpcAddr}, client.WithClientID("good"), client.WithTokenSource(source), client.WithDialOptions(creds))
+	cl, err := client.New(ctx, client.Endpoints{grpcAddr}, client.WithClientID("good"), client.WithTokenSource(source), client.WithTransportCredentials(tc))
 	if err != nil {
 		t.Fatalf("TestServerTLSOIDC: Dial: %s", err)
 	}
@@ -293,7 +300,7 @@ func TestServerTLSOIDC(t *testing.T) {
 	// A tokenless client cannot open a session.
 	dialCtx, cancelDial := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelDial()
-	if bad, err := client.New(dialCtx, client.Endpoints{grpcAddr}, client.WithClientID("intruder"), client.WithDialOptions(creds)); err == nil {
+	if bad, err := client.New(dialCtx, client.Endpoints{grpcAddr}, client.WithClientID("intruder"), client.WithTransportCredentials(tc)); err == nil {
 		_ = bad.Close()
 		t.Errorf("TestServerTLSOIDC: tokenless client connected, want Unauthenticated")
 	}
@@ -438,4 +445,153 @@ func TestForwardedWriteSelf(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// TestRunStartSteps is a regression test for the background-task leak: if a later
+// startup step fails, the node-lifetime context (which already has announceSelf and any
+// earlier step running on it) must be cancelled, not left alive forever. It also checks
+// the success path leaves the context running.
+func TestRunStartSteps(t *testing.T) {
+	tests := []struct {
+		name    string
+		failAt  int // index of the step that returns an error; -1 means none fail
+		wantErr bool
+	}{
+		{name: "Success: all steps start, context stays alive", failAt: -1},
+		{name: "Error: a later step fails, context is cancelled", failAt: 1, wantErr: true},
+	}
+
+	for _, test := range tests {
+		ctx, cancel := context.WithCancel(t.Context())
+
+		// firstCtx records the context handed to the first (always-succeeding) step,
+		// standing in for announceSelf/an earlier task that must be cancelled on failure.
+		var firstCtx context.Context
+		steps := []startStep{
+			{
+				name: "first",
+				run: func(c context.Context) error {
+					firstCtx = c
+					return nil
+				},
+			},
+			{
+				name: "second",
+				run: func(c context.Context) error {
+					if test.failAt == 1 {
+						return errors.New("boom")
+					}
+					return nil
+				},
+			},
+		}
+
+		err := runStartSteps(ctx, cancel, steps)
+		switch {
+		case err == nil && test.wantErr:
+			t.Errorf("TestRunStartSteps(%s): got err == nil, want err != nil", test.name)
+		case err != nil && !test.wantErr:
+			t.Errorf("TestRunStartSteps(%s): got err == %s, want err == nil", test.name, err)
+		}
+
+		cancelled := firstCtx.Err() != nil
+		if cancelled != test.wantErr {
+			t.Errorf("TestRunStartSteps(%s): started-task context cancelled = %v, want %v", test.name, cancelled, test.wantErr)
+		}
+		cancel()
+	}
+}
+
+// TestNodeUI boots a real node with the embedded web UI enabled, acquires a lock through
+// the production client, and confirms the UI renders the namespace listing and the
+// record's detail end-to-end (node.New wiring + in-process Browse + HTTP handlers).
+func TestNodeUI(t *testing.T) {
+	ctx := t.Context()
+
+	raftAddr, err := freePort()
+	if err != nil {
+		t.Fatalf("TestNodeUI: freePort: %s", err)
+	}
+	uiAddr, err := freePort()
+	if err != nil {
+		t.Fatalf("TestNodeUI: freePort (ui): %s", err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("TestNodeUI: listen: %s", err)
+	}
+	grpcAddr := lis.Addr().String()
+
+	bootCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	n, err := New(bootCtx, Config{
+		ReplicaID:   1,
+		RaftAddr:    raftAddr,
+		GRPCAddr:    grpcAddr,
+		DataDir:     "zuul-ui-test",
+		Shards:      []uint64{1, 2},
+		MetaShardID: 1_000_000,
+		Members:     map[uint64]string{1: raftAddr},
+		Seed:        map[uint64]string{1: grpcAddr},
+		UIEnable:    true,
+		UIBind:      uiAddr,
+	})
+	if err != nil {
+		t.Fatalf("TestNodeUI: New: %s", err)
+	}
+	t.Cleanup(n.Close)
+	context.Pool(ctx).Submit(ctx, func() { _ = n.Serve(lis) })
+	if err := n.Start(ctx); err != nil {
+		t.Fatalf("TestNodeUI: Start: %s", err)
+	}
+
+	cl, err := client.New(ctx, client.Endpoints{grpcAddr}, client.WithClientID("c1"))
+	if err != nil {
+		t.Fatalf("TestNodeUI: client.New: %s", err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+
+	// Acquire a lock so a record exists, retrying until the shard has a leader.
+	var ok bool
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		ok, err = cl.NewMutex("/alice/lock").TryLock(ctx)
+		if err == nil && ok {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("TestNodeUI: TryLock never succeeded: ok=%v err=%v", ok, err)
+	}
+
+	// The namespace view lists the record.
+	if body := uiGet(t, "http://"+uiAddr+"/?ns=/alice"); !strings.Contains(body, "/alice/lock") {
+		t.Errorf("TestNodeUI: namespace view missing /alice/lock:\n%s", body)
+	}
+	// The detail view shows the holder.
+	detail := uiGet(t, "http://"+uiAddr+"/?ns=/alice&rec=/alice/lock")
+	for _, want := range []string{"/alice/lock", "c1", "Detail"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("TestNodeUI: detail view missing %q", want)
+		}
+	}
+}
+
+// uiGet fetches url and returns the body, failing the test on error or non-200.
+func uiGet(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("uiGet(%s): %s", url, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("uiGet(%s): read: %s", url, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("uiGet(%s): status %d: %s", url, resp.StatusCode, b)
+	}
+	return string(b)
 }

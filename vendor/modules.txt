@@ -181,6 +181,7 @@ github.com/gostdlib/base/concurrency/worker/internal/heap
 github.com/gostdlib/base/context
 github.com/gostdlib/base/env/detect
 github.com/gostdlib/base/errors
+github.com/gostdlib/base/init
 github.com/gostdlib/base/internal/context
 github.com/gostdlib/base/internal/envvar
 github.com/gostdlib/base/internal/errors
@@ -190,6 +191,16 @@ github.com/gostdlib/base/telemetry/otel/metrics
 github.com/gostdlib/base/telemetry/otel/trace
 github.com/gostdlib/base/telemetry/otel/trace/sampler
 github.com/gostdlib/base/telemetry/otel/trace/span
+github.com/gostdlib/base/values/immutable
+github.com/gostdlib/base/values/immutable/internal/immutable
+# github.com/gostdlib/concurrency v0.0.0-20241230205952-55ea9e292314
+## explicit; go 1.23.4
+github.com/gostdlib/concurrency/goroutines
+github.com/gostdlib/concurrency/goroutines/internal/pool
+github.com/gostdlib/concurrency/prim/wait
+# github.com/gostdlib/internals v0.0.0-20240319155855-57c259c0554f
+## explicit; go 1.19
+github.com/gostdlib/internals/otel/span
 # github.com/grafana/regexp v0.0.0-20240518133315-a468a5bfb3bc
 ## explicit; go 1.21
 github.com/grafana/regexp
@@ -473,6 +484,12 @@ go.opentelemetry.io/proto/otlp/collector/trace/v1
 go.opentelemetry.io/proto/otlp/common/v1
 go.opentelemetry.io/proto/otlp/resource/v1
 go.opentelemetry.io/proto/otlp/trace/v1
+# go.uber.org/automaxprocs v1.6.0
+## explicit; go 1.20
+go.uber.org/automaxprocs
+go.uber.org/automaxprocs/internal/cgroups
+go.uber.org/automaxprocs/internal/runtime
+go.uber.org/automaxprocs/maxprocs
 # go.yaml.in/yaml/v2 v2.4.2
 ## explicit; go 1.15
 go.yaml.in/yaml/v2

@@ -1,7 +1,7 @@
 package errors
 
 import (
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -29,10 +29,11 @@ func StreamServerInterceptor() grpc.StreamServerInterceptor {
 	}
 }
 
-// Status converts err into a gRPC status error for a server handler to return. A nil err
-// returns nil. An err that already carries a gRPC status is returned unchanged. An Error
-// uses its Category's gRPC code and its (redacted) message. Any other error is classified
-// as Internal so an unclassified error never leaves the server without a code.
+// Status converts err into an error a server handler can return that carries a gRPC code.
+// A nil err returns nil. An err that already carries a gRPC status (a zuul Error or a real
+// status error) is returned unchanged — its GRPCStatus already reports the right code. Any
+// other (unclassified) error is classified as Internal so it never leaves the server
+// without a code.
 func Status(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -40,16 +41,22 @@ func Status(ctx context.Context, err error) error {
 	if _, ok := status.FromError(err); ok {
 		return err
 	}
-	var e Error
-	if As(err, &e) {
-		c := UnknownCategory
-		if cat, ok := e.Category.(Category); ok {
-			c = cat
-		}
-		return status.Error(c.Code(), e.Error())
+	return E(ctx, CatInternal, UnknownType, err)
+}
+
+// GRPCStatus lets status.Code/status.FromError recognize a zuul Error directly. If the
+// cause already carries a status (a client-side FromStatus wrapping a transport error),
+// that status is preserved so the original code round-trips; otherwise the Category's code
+// and the (redacted) message are used.
+func (e Error) GRPCStatus() *status.Status {
+	if st, ok := status.FromError(e.base); ok {
+		return st
 	}
-	e = E(ctx, CatInternal, UnknownType, err)
-	return status.Error(codes.Internal, e.Error())
+	c := UnknownCategory
+	if cat, ok := e.base.Category.(Category); ok {
+		c = cat
+	}
+	return status.New(c.Code(), e.base.Error())
 }
 
 // FromStatus maps a gRPC status error received by a client back into a classified Error,

@@ -384,3 +384,100 @@ message HealthResponse {
 	// leader_count is the number of those shards this node currently leads.
 	uint64 leader_count = 3;
 }
+
+// Browse is a read-only introspection API for an operator UI: enumerate the
+// locks/elections in a namespace (key prefix) and inspect one record's holder,
+// contenders, and observers. It never mutates state.
+service Browse {
+	// ListRecords returns the held locks/elections whose key falls under prefix
+	// (a namespace like "/user" or "/user/dir"; empty returns all), aggregated across
+	// shards, plus the set of namespaces present.
+	rpc ListRecords(ListRecordsRequest) returns (ListRecordsResponse);
+	// GetRecord returns one key's full detail: holder/leader, fencing token, published
+	// value, the FIFO wait-queue contenders, and the cluster-wide observers.
+	rpc GetRecord(GetRecordRequest) returns (GetRecordResponse);
+}
+
+// RecordKind classifies a browsed record. It is best-effort: lock vs election is
+// inferred from whether a value has been published.
+enum RecordKind {
+	// RECORD_KIND_UNKNOWN is the unset zero value.
+	RECORD_KIND_UNKNOWN = 0;
+	// RECORD_KIND_LOCK is a plain mutual-exclusion lock.
+	RECORD_KIND_LOCK = 1;
+	// RECORD_KIND_ELECTION is a leader election (a value has been published).
+	RECORD_KIND_ELECTION = 2;
+}
+
+// Record is the summary of one held lock/election.
+message Record {
+	// key is the lock/election key.
+	string key = 1;
+	// kind is the inferred record kind (best-effort; see RecordKind).
+	RecordKind kind = 2;
+	// held reports whether the key currently has a holder/leader.
+	bool held = 3;
+	// holder_client_id is the holder/leader's client id.
+	string holder_client_id = 4;
+	// fencing_token is the holder's fencing token.
+	uint64 fencing_token = 5;
+	// queue_depth is the number of contenders behind the holder.
+	uint32 queue_depth = 6;
+	// revision is the FSM logical clock at which this was read.
+	uint64 revision = 7;
+}
+
+message ListRecordsRequest {
+	// prefix narrows the result to keys under it (path boundary); empty returns all.
+	string prefix = 1;
+	// limit, when > 0, caps the number of records returned (reserved for pagination;
+	// not yet enforced).
+	uint32 limit = 2;
+}
+
+message ListRecordsResponse {
+	// records are the matching held locks/elections, sorted by key.
+	repeated Record records = 1;
+	// namespaces are the distinct owner segments present under prefix, sorted.
+	repeated string namespaces = 2;
+}
+
+// Contender is one entry of a key's FIFO wait queue (a client blocked acquiring the
+// lock or campaigning).
+message Contender {
+	// client_id is the waiting client.
+	string client_id = 1;
+	// position is the 1-based position in the queue.
+	uint32 position = 2;
+	// enqueue_seq is the waiter's monotonic enqueue order.
+	uint64 enqueue_seq = 3;
+}
+
+// Observer is one client watching a key via an Election Observe stream, attributed to
+// the node hosting the subscription. Observers are approximate (currently-connected
+// streams), not a linearizable count.
+message Observer {
+	// identity is the observer's authenticated identity; "" if unauthenticated.
+	string identity = 1;
+	// replica_id is the node hosting the subscription.
+	uint64 replica_id = 2;
+}
+
+message GetRecordRequest {
+	// key is the lock/election key to inspect.
+	string key = 1;
+}
+
+message GetRecordResponse {
+	// record is the summary of the key.
+	Record record = 1;
+	// value is the published election value; empty for a plain lock.
+	bytes value = 2;
+	// contenders are the FIFO wait-queue entries (replicated, from the FSM).
+	repeated Contender contenders = 3;
+	// observers are the Observe-stream watchers, aggregated cluster-wide.
+	repeated Observer observers = 4;
+	// partial is true when some node could not be reached for observers, so the
+	// observer list may be incomplete.
+	bool partial = 5;
+}

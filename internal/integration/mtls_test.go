@@ -4,13 +4,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gostdlib/base/context"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	"github.com/johnsiilver/zuul/context"
+
 	"github.com/johnsiilver/zuul/client"
-	"github.com/johnsiilver/zuul/internal/zuultls"
-	"github.com/johnsiilver/zuul/internal/zuultls/zuultlstest"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls/zuultlstest"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
 
@@ -47,8 +47,8 @@ func TestMutualTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestMutualTLS: client TLS config: %s", err)
 	}
-	creds := grpc.WithTransportCredentials(credentials.NewTLS(clientTLS))
-	cl, err := client.New(ctx, client.Endpoints{c.grpcAddrs[c.nodes[0].replicaID]}, client.WithClientID("alice"), client.WithDialOptions(creds))
+	tc := credentials.NewTLS(clientTLS)
+	cl, err := client.New(ctx, client.Endpoints{c.grpcAddrs[c.nodes[0].replicaID]}, client.WithClientID("alice"), client.WithTransportCredentials(tc))
 	if err != nil {
 		t.Fatalf("TestMutualTLS: client Dial over mTLS: %s", err)
 	}

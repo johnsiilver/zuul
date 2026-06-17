@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/client"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"

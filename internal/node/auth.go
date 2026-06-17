@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
 	"strings"
@@ -13,12 +14,13 @@ import (
 	"google.golang.org/grpc/peer"
 
 	"github.com/gostdlib/base/concurrency/sync"
-	"github.com/gostdlib/base/context"
+
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/errors"
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/forward/forwardpb"
-	"github.com/johnsiilver/zuul/internal/oidcauth"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/auth/oidcauth"
+	"github.com/johnsiilver/zuul/internal/raft/forward/forwardpb"
 )
 
 // bearerPrefix is the (case-insensitive) HTTP bearer auth scheme prefix.
@@ -62,10 +64,27 @@ func classify(fullMethod string) methodClass {
 
 // bearerAuth authenticates client-facing calls from a bearer token: a static token
 // map (exact match) and/or OIDC JWT validation. Either source yields the identity
-// attached to the context for authorization.
+// attached to the context for authorization. Static tokens are keyed by the SHA-256 of
+// the token (see hashTokens), not the plaintext.
 type bearerAuth struct {
-	tokens map[string]string
+	tokens map[[32]byte]string
 	oidc   *oidcauth.Verifier
+}
+
+// hashTokens keys a token->identity map by the SHA-256 of each token. Looking a presented
+// token up by its fixed-length hash keeps the lookup time independent of how many leading
+// bytes a guess shares with a real token — a plaintext-keyed map lookup can leak that via
+// timing — without an O(n) constant-time scan over every configured token. Returns nil for
+// an empty input so enabled() stays correct.
+func hashTokens(tokens map[string]string) map[[32]byte]string {
+	if len(tokens) == 0 {
+		return nil
+	}
+	h := make(map[[32]byte]string, len(tokens))
+	for tok, id := range tokens {
+		h[sha256.Sum256([]byte(tok))] = id
+	}
+	return h
 }
 
 // enabled reports whether any bearer authentication is configured.
@@ -89,13 +108,13 @@ func (b *bearerAuth) authenticate(ctx context.Context) (context.Context, error) 
 	if len(token) >= len(bearerPrefix) && strings.EqualFold(token[:len(bearerPrefix)], bearerPrefix) {
 		token = token[len(bearerPrefix):]
 	}
-	if identity, ok := b.tokens[token]; ok {
-		return authz.WithIdentity(ctx, identity), nil
+	if identity, ok := b.tokens[sha256.Sum256([]byte(token))]; ok {
+		return context.WithIdentity(ctx, identity), nil
 	}
 	if b.oidc != nil {
 		identity, err := b.oidc.Verify(ctx, token)
 		if err == nil {
-			return authz.WithIdentity(ctx, identity), nil
+			return context.WithIdentity(ctx, identity), nil
 		}
 	}
 	return nil, errors.E(ctx, errors.CatUnauthenticated, errors.TypeInvalidToken, fmt.Errorf("invalid authorization token"))
@@ -149,7 +168,7 @@ func (g *authGate) check(ctx context.Context, fullMethod string) (context.Contex
 // for deployments with no authenticating method). Absent header, nothing changes.
 func reconcileUser(ctx context.Context) (context.Context, error) {
 	user := firstMetadata(ctx, authz.UserHeader)
-	authID, ok := authz.IdentityFromContext(ctx)
+	authID, ok := context.IdentityFromContext(ctx)
 	switch {
 	case ok && authID != "":
 		if user != "" && user != authID {
@@ -157,7 +176,7 @@ func reconcileUser(ctx context.Context) (context.Context, error) {
 		}
 		return ctx, nil
 	case user != "":
-		return authz.WithIdentity(ctx, user), nil
+		return context.WithIdentity(ctx, user), nil
 	default:
 		return ctx, nil
 	}
@@ -286,7 +305,7 @@ func (l *identityLimiters) allow(identity string) bool {
 // perIdentityUnary rejects a unary call when the caller's own bucket is drained.
 func perIdentityUnary(l *identityLimiters) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		identity, _ := authz.IdentityFromContext(ctx)
+		identity, _ := context.IdentityFromContext(ctx)
 		if !l.allow(identity) {
 			return nil, errors.E(ctx, errors.CatResourceExhausted, errors.TypeRateLimited, fmt.Errorf("rate limit exceeded for %q", identity))
 		}
@@ -297,7 +316,7 @@ func perIdentityUnary(l *identityLimiters) grpc.UnaryServerInterceptor {
 // perIdentityStream rejects a new stream when the caller's bucket is drained.
 func perIdentityStream(l *identityLimiters) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		identity, _ := authz.IdentityFromContext(ss.Context())
+		identity, _ := context.IdentityFromContext(ss.Context())
 		if !l.allow(identity) {
 			return errors.E(ss.Context(), errors.CatResourceExhausted, errors.TypeRateLimited, fmt.Errorf("rate limit exceeded for %q", identity))
 		}

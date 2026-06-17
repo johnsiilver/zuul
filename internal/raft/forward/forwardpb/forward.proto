@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+// Package zuul.forward is Zuul's internal node-to-node forwarding API. Raft
+// proposals must originate on a shard's leader, so when a client write lands on a
+// node that does not lead the target shard, the node forwards the already-encoded
+// FSM command to the leader node's Forwarder, which proposes it locally and
+// returns the encoded result. This is an internal plane, never exposed to clients.
+package zuul.forward;
+
+option go_package = "github.com/johnsiilver/zuul/internal/raft/forward/forwardpb;forwardpb";
+
+// Forwarder serves requests on behalf of a peer that is not the shard leader: both
+// command proposals and Raft membership changes must originate on the leader.
+service Forwarder {
+	// Propose applies command to the given shard. The receiver must be the shard
+	// leader; if it is not (leadership moved again), it returns a FAILED_PRECONDITION
+	// error so the caller re-resolves the leader and retries.
+	rpc Propose(ProposeRequest) returns (ProposeResponse);
+	// AddReplica adds a replica to the given shard. The receiver must be that
+	// shard's leader, else FAILED_PRECONDITION.
+	rpc AddReplica(AddReplicaRequest) returns (MembershipResponse);
+	// RemoveReplica removes a replica from the given shard. The receiver must be
+	// that shard's leader, else FAILED_PRECONDITION.
+	rpc RemoveReplica(RemoveReplicaRequest) returns (MembershipResponse);
+	// ListObservers returns this node's local watch-hub observers (Election Observe
+	// streams) for key, or for all keys when key is empty. The node serving the
+	// browsing UI calls it on every peer to aggregate observers cluster-wide, since the
+	// hub is node-local.
+	rpc ListObservers(ListObserversRequest) returns (ListObserversResponse);
+}
+
+message ProposeRequest {
+	// shard_id is the Raft group the command targets.
+	uint64 shard_id = 1;
+	// command is a marshalled zuul.fsm.Command.
+	bytes command = 2;
+}
+
+message ProposeResponse {
+	// result is a marshalled zuul.fsm.CommandResult.
+	bytes result = 1;
+}
+
+message AddReplicaRequest {
+	// shard_id is the Raft group to add the replica to.
+	uint64 shard_id = 1;
+	// replica_id is the new replica's id.
+	uint64 replica_id = 2;
+	// raft_address is the new replica's Raft transport address.
+	string raft_address = 3;
+}
+
+message RemoveReplicaRequest {
+	// shard_id is the Raft group to remove the replica from.
+	uint64 shard_id = 1;
+	// replica_id is the replica to remove.
+	uint64 replica_id = 2;
+}
+
+message MembershipResponse {}
+
+message ListObserversRequest {
+	// key restricts the result to observers of this key; empty returns observers of
+	// every key.
+	string key = 1;
+}
+
+// ObserverEntry is one local Observe-stream subscriber.
+message ObserverEntry {
+	// key is the watched lock/election key.
+	string key = 1;
+	// identity is the observer's authenticated identity; "" if unauthenticated.
+	string identity = 2;
+}
+
+message ListObserversResponse {
+	// replica_id is the responding node's replica id.
+	uint64 replica_id = 1;
+	// observers are this node's local watch-hub observers.
+	repeated ObserverEntry observers = 2;
+}

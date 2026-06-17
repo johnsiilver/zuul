@@ -23,13 +23,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
+	zinit "github.com/johnsiilver/zuul/init"
 
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/consensus"
-	"github.com/johnsiilver/zuul/internal/discovery"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/cluster/discovery"
 	"github.com/johnsiilver/zuul/internal/node"
+	"github.com/johnsiilver/zuul/internal/raft/consensus"
 )
+
+// version is the build tag — the image version or commit hash — set at link time with
+// -ldflags "-X main.version=...". base/init records it in log and trace output.
+var version = "dev"
 
 // metaShard is the reserved Raft group id for the topology (meta) shard, kept clear
 // of the lock shard ids (1..shards).
@@ -43,12 +48,28 @@ const bootTimeout = 60 * time.Second
 const drainTimeout = 10 * time.Second
 
 func main() {
+	os.Exit(run())
+}
+
+// run wires up and serves one node, returning the process exit code. It is split from main
+// so the deferred init.Close — which flushes logs/traces/metrics and runs registered
+// closers — runs on every exit path, including startup failures; os.Exit (which skips
+// defers) is confined to main.
+func run() int {
 	cfg, err := parseFlags()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "zuuld: %s\n", err)
-		os.Exit(2)
+		return 2
 	}
 
+	// init.Service sets up logging, tracing, metrics, GOMAXPROCS, and GOMEMLIMIT; the
+	// deferred init.Close flushes them on return. This base/init does not act on
+	// InitArgs.SignalHandlers, so the service installs its own signal handling below.
+	args := zinit.InitArgs{Meta: zinit.Meta{Service: "zuuld", Build: version}}
+	zinit.Service(args)
+	defer zinit.Close(args)
+
+	// Background must follow Service so the clients it attaches reflect the configured defaults.
 	ctx := context.Background()
 	log := context.Log(ctx)
 
@@ -94,9 +115,14 @@ func main() {
 		SnapshotEntries:            cfg.snapEntries,
 		CompactionOverhead:         cfg.compaction,
 		MaxRecvBytes:               cfg.maxRecvBytes,
+
+		UIEnable: cfg.uiEnable,
+		UIBind:   cfg.uiBind,
+		UITLS:    cfg.uiTLS,
 	})
 	if err != nil {
-		fatal(log, "assemble node", err)
+		log.Error("zuuld: assemble node", "err", err.Error())
+		return 1
 	}
 
 	listenAddr := cfg.grpcListen
@@ -105,19 +131,25 @@ func main() {
 	}
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		fatal(log, "listen", err)
+		log.Error("zuuld: listen", "err", err.Error())
+		return 1
+	}
+	// Start the background tasks (lease-expiry sweep, health watcher, self-announce)
+	// before accepting traffic, so the node is not serving RPCs while half-initialized.
+	if err := n.Start(ctx); err != nil {
+		log.Error("zuuld: start node", "err", err.Error())
+		return 1
 	}
 	context.Pool(ctx).Submit(ctx, func() {
 		if err := n.Serve(lis); err != nil {
 			log.Error("grpc server stopped", "err", err.Error())
 		}
 	})
-	if err := n.Start(ctx); err != nil {
-		fatal(log, "start node", err)
-	}
 
 	log.Info("zuuld serving", "replica", cfg.id, "grpc", cfg.grpc, "raft", cfg.raft, "shards", cfg.shards, "join", cfg.join, "mutualTLS", cfg.mutualTLS, "serverTLS", cfg.serverTLS, "oidc", cfg.oidcIssuer != "", "gossip", cfg.gossip)
 
+	// Wait for a termination signal, then drain leadership and close the node. Returning
+	// runs the deferred init.Close, which flushes telemetry.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
@@ -129,6 +161,7 @@ func main() {
 
 	log.Info("zuuld shutting down")
 	n.Close()
+	return 0
 }
 
 // splitNonEmpty splits a comma list, dropping empty fields.
@@ -144,12 +177,6 @@ func splitNonEmpty(s string) []string {
 		}
 	}
 	return out
-}
-
-// fatal logs and exits non-zero.
-func fatal(log interface{ Error(string, ...any) }, what string, err error) {
-	log.Error("zuuld: "+what, "err", err.Error())
-	os.Exit(1)
 }
 
 // config is the parsed flag set.
@@ -184,6 +211,9 @@ type config struct {
 	snapEntries  uint64
 	compaction   uint64
 	maxRecvBytes int               // max inbound gRPC message size (0 = default 1 MiB)
+	uiEnable     bool              // serve the read-only browsing web UI
+	uiBind       string            // UI HTTP listen address (required with uiEnable)
+	uiTLS        bool              // serve the UI over the node's server TLS
 	members      map[uint64]string // replica id -> raft address or nhid target (bootstrap)
 	seed         map[uint64]string // replica id -> grpc address (forwarding seed)
 }
@@ -227,9 +257,12 @@ func parseFlags() (config, error) {
 		rlBurst = flag.Int("rate-burst", 0, "global rate-limit burst (default rate+1)")
 		piRate  = flag.Float64("per-identity-rate-limit", 0, "per-identity requests/sec cap (0 = unlimited)")
 		piBurst = flag.Int("per-identity-rate-burst", 0, "per-identity burst (default rate+1)")
-		snapEnt = flag.Uint64("snapshot-entries", 0, "Raft entries per snapshot/compaction (0 = default 10000)")
+		snapEnt = flag.Uint64("snapshot-entries", 0, "Raft entries per snapshot/compaction (0 = default 1000; the log is in RAM, so this bounds LogDB memory)")
 		compact = flag.Uint64("compaction-overhead", 0, "Raft entries retained after compaction (0 = default 100)")
 		maxRecv = flag.Int("max-recv-bytes", 0, "max inbound gRPC message size in bytes, including a published election value (0 = default 1 MiB)")
+		uiEn    = flag.Bool("ui-enable", false, "serve the optional read-only browsing web UI")
+		uiBind  = flag.String("ui-bind", "", "web UI HTTP listen address, e.g. 127.0.0.1:9999 (required with --ui-enable; the UI has no auth, so bind it to localhost or front it with TLS)")
+		uiTLS   = flag.Bool("ui-tls", false, "serve the UI over the node's server TLS (reuses --tls-ca/-cert/-key)")
 		cfgFile = flag.String("config", "", "JSON config file that fully defines the node (other flags are ignored)")
 	)
 	flag.Parse()
@@ -262,6 +295,9 @@ func parseFlags() (config, error) {
 		snapEntries:  *snapEnt,
 		compaction:   *compact,
 		maxRecvBytes: *maxRecv,
+		uiEnable:     *uiEn,
+		uiBind:       *uiBind,
+		uiTLS:        *uiTLS,
 		members:      map[uint64]string{},
 		seed:         map[uint64]string{},
 	}

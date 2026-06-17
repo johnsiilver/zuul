@@ -128,9 +128,13 @@ method it is the advisory `zuul-user` header.
   same on every node; forwarded writes must fit too).
 - `--rate-limit` / `--per-identity-rate-limit` — request-rate caps.
 - `--shards <n>` — keep consistent across the StatefulSet.
+- `--ui-enable` + `--ui-bind 127.0.0.1:9999` — optional **read-only** browsing web UI.
+  It has **no auth**, so bind it to localhost (and reach it via `kubectl port-forward`)
+  or add `--ui-tls` to serve it over the node's server TLS (reuses `--tls-ca/-cert/-key`).
+  Never expose it on a Service across a trust boundary.
 - Prefer a single `--config` JSON (ConfigMap) over many flags for complex setups;
   see `cmd/zuuld/configfile.go` for the schema (incl. `maxRecvBytes`, `aclFile`,
-  `authTokensFile`).
+  `authTokensFile`, `uiEnable`/`uiBind`/`uiTLS`).
 
 ## Procedure for this skill
 

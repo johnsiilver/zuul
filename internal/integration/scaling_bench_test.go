@@ -29,7 +29,8 @@ import (
 	"time"
 
 	"github.com/gostdlib/base/concurrency/sync"
-	"github.com/gostdlib/base/context"
+
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/client"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"

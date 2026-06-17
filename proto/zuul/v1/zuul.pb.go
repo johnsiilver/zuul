@@ -91,6 +91,60 @@ func (ReadMode) EnumDescriptor() ([]byte, []int) {
 	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{0}
 }
 
+// RecordKind classifies a browsed record. It is best-effort: lock vs election is
+// inferred from whether a value has been published.
+type RecordKind int32
+
+const (
+	// RECORD_KIND_UNKNOWN is the unset zero value.
+	RecordKind_RECORD_KIND_UNKNOWN RecordKind = 0
+	// RECORD_KIND_LOCK is a plain mutual-exclusion lock.
+	RecordKind_RECORD_KIND_LOCK RecordKind = 1
+	// RECORD_KIND_ELECTION is a leader election (a value has been published).
+	RecordKind_RECORD_KIND_ELECTION RecordKind = 2
+)
+
+// Enum value maps for RecordKind.
+var (
+	RecordKind_name = map[int32]string{
+		0: "RECORD_KIND_UNKNOWN",
+		1: "RECORD_KIND_LOCK",
+		2: "RECORD_KIND_ELECTION",
+	}
+	RecordKind_value = map[string]int32{
+		"RECORD_KIND_UNKNOWN":  0,
+		"RECORD_KIND_LOCK":     1,
+		"RECORD_KIND_ELECTION": 2,
+	}
+)
+
+func (x RecordKind) Enum() *RecordKind {
+	p := new(RecordKind)
+	*p = x
+	return p
+}
+
+func (x RecordKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RecordKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_enumTypes[1].Descriptor()
+}
+
+func (RecordKind) Type() protoreflect.EnumType {
+	return &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_enumTypes[1]
+}
+
+func (x RecordKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RecordKind.Descriptor instead.
+func (RecordKind) EnumDescriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{1}
+}
+
 type KeepAliveRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// client_id identifies the session owner. Set on the first request to claim an
@@ -2029,6 +2083,464 @@ func (x *HealthResponse) GetLeaderCount() uint64 {
 	return 0
 }
 
+// Record is the summary of one held lock/election.
+type Record struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// key is the lock/election key.
+	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	// kind is the inferred record kind (best-effort; see RecordKind).
+	Kind RecordKind `protobuf:"varint,2,opt,name=kind,proto3,enum=zuul.v1.RecordKind" json:"kind,omitempty"`
+	// held reports whether the key currently has a holder/leader.
+	Held bool `protobuf:"varint,3,opt,name=held,proto3" json:"held,omitempty"`
+	// holder_client_id is the holder/leader's client id.
+	HolderClientId string `protobuf:"bytes,4,opt,name=holder_client_id,json=holderClientId,proto3" json:"holder_client_id,omitempty"`
+	// fencing_token is the holder's fencing token.
+	FencingToken uint64 `protobuf:"varint,5,opt,name=fencing_token,json=fencingToken,proto3" json:"fencing_token,omitempty"`
+	// queue_depth is the number of contenders behind the holder.
+	QueueDepth uint32 `protobuf:"varint,6,opt,name=queue_depth,json=queueDepth,proto3" json:"queue_depth,omitempty"`
+	// revision is the FSM logical clock at which this was read.
+	Revision      uint64 `protobuf:"varint,7,opt,name=revision,proto3" json:"revision,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Record) Reset() {
+	*x = Record{}
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Record) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Record) ProtoMessage() {}
+
+func (x *Record) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Record.ProtoReflect.Descriptor instead.
+func (*Record) Descriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *Record) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *Record) GetKind() RecordKind {
+	if x != nil {
+		return x.Kind
+	}
+	return RecordKind_RECORD_KIND_UNKNOWN
+}
+
+func (x *Record) GetHeld() bool {
+	if x != nil {
+		return x.Held
+	}
+	return false
+}
+
+func (x *Record) GetHolderClientId() string {
+	if x != nil {
+		return x.HolderClientId
+	}
+	return ""
+}
+
+func (x *Record) GetFencingToken() uint64 {
+	if x != nil {
+		return x.FencingToken
+	}
+	return 0
+}
+
+func (x *Record) GetQueueDepth() uint32 {
+	if x != nil {
+		return x.QueueDepth
+	}
+	return 0
+}
+
+func (x *Record) GetRevision() uint64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+type ListRecordsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// prefix narrows the result to keys under it (path boundary); empty returns all.
+	Prefix string `protobuf:"bytes,1,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	// limit, when > 0, caps the number of records returned (reserved for pagination;
+	// not yet enforced).
+	Limit         uint32 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRecordsRequest) Reset() {
+	*x = ListRecordsRequest{}
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRecordsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRecordsRequest) ProtoMessage() {}
+
+func (x *ListRecordsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRecordsRequest.ProtoReflect.Descriptor instead.
+func (*ListRecordsRequest) Descriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ListRecordsRequest) GetPrefix() string {
+	if x != nil {
+		return x.Prefix
+	}
+	return ""
+}
+
+func (x *ListRecordsRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type ListRecordsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// records are the matching held locks/elections, sorted by key.
+	Records []*Record `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	// namespaces are the distinct owner segments present under prefix, sorted.
+	Namespaces    []string `protobuf:"bytes,2,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRecordsResponse) Reset() {
+	*x = ListRecordsResponse{}
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRecordsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRecordsResponse) ProtoMessage() {}
+
+func (x *ListRecordsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRecordsResponse.ProtoReflect.Descriptor instead.
+func (*ListRecordsResponse) Descriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *ListRecordsResponse) GetRecords() []*Record {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
+func (x *ListRecordsResponse) GetNamespaces() []string {
+	if x != nil {
+		return x.Namespaces
+	}
+	return nil
+}
+
+// Contender is one entry of a key's FIFO wait queue (a client blocked acquiring the
+// lock or campaigning).
+type Contender struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// client_id is the waiting client.
+	ClientId string `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	// position is the 1-based position in the queue.
+	Position uint32 `protobuf:"varint,2,opt,name=position,proto3" json:"position,omitempty"`
+	// enqueue_seq is the waiter's monotonic enqueue order.
+	EnqueueSeq    uint64 `protobuf:"varint,3,opt,name=enqueue_seq,json=enqueueSeq,proto3" json:"enqueue_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Contender) Reset() {
+	*x = Contender{}
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Contender) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Contender) ProtoMessage() {}
+
+func (x *Contender) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Contender.ProtoReflect.Descriptor instead.
+func (*Contender) Descriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *Contender) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *Contender) GetPosition() uint32 {
+	if x != nil {
+		return x.Position
+	}
+	return 0
+}
+
+func (x *Contender) GetEnqueueSeq() uint64 {
+	if x != nil {
+		return x.EnqueueSeq
+	}
+	return 0
+}
+
+// Observer is one client watching a key via an Election Observe stream, attributed to
+// the node hosting the subscription. Observers are approximate (currently-connected
+// streams), not a linearizable count.
+type Observer struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// identity is the observer's authenticated identity; "" if unauthenticated.
+	Identity string `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	// replica_id is the node hosting the subscription.
+	ReplicaId     uint64 `protobuf:"varint,2,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Observer) Reset() {
+	*x = Observer{}
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Observer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Observer) ProtoMessage() {}
+
+func (x *Observer) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Observer.ProtoReflect.Descriptor instead.
+func (*Observer) Descriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *Observer) GetIdentity() string {
+	if x != nil {
+		return x.Identity
+	}
+	return ""
+}
+
+func (x *Observer) GetReplicaId() uint64 {
+	if x != nil {
+		return x.ReplicaId
+	}
+	return 0
+}
+
+type GetRecordRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// key is the lock/election key to inspect.
+	Key           string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRecordRequest) Reset() {
+	*x = GetRecordRequest{}
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRecordRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRecordRequest) ProtoMessage() {}
+
+func (x *GetRecordRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRecordRequest.ProtoReflect.Descriptor instead.
+func (*GetRecordRequest) Descriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *GetRecordRequest) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+type GetRecordResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// record is the summary of the key.
+	Record *Record `protobuf:"bytes,1,opt,name=record,proto3" json:"record,omitempty"`
+	// value is the published election value; empty for a plain lock.
+	Value []byte `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	// contenders are the FIFO wait-queue entries (replicated, from the FSM).
+	Contenders []*Contender `protobuf:"bytes,3,rep,name=contenders,proto3" json:"contenders,omitempty"`
+	// observers are the Observe-stream watchers, aggregated cluster-wide.
+	Observers []*Observer `protobuf:"bytes,4,rep,name=observers,proto3" json:"observers,omitempty"`
+	// partial is true when some node could not be reached for observers, so the
+	// observer list may be incomplete.
+	Partial       bool `protobuf:"varint,5,opt,name=partial,proto3" json:"partial,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRecordResponse) Reset() {
+	*x = GetRecordResponse{}
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRecordResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRecordResponse) ProtoMessage() {}
+
+func (x *GetRecordResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRecordResponse.ProtoReflect.Descriptor instead.
+func (*GetRecordResponse) Descriptor() ([]byte, []int) {
+	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *GetRecordResponse) GetRecord() *Record {
+	if x != nil {
+		return x.Record
+	}
+	return nil
+}
+
+func (x *GetRecordResponse) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+func (x *GetRecordResponse) GetContenders() []*Contender {
+	if x != nil {
+		return x.Contenders
+	}
+	return nil
+}
+
+func (x *GetRecordResponse) GetObservers() []*Observer {
+	if x != nil {
+		return x.Observers
+	}
+	return nil
+}
+
+func (x *GetRecordResponse) GetPartial() bool {
+	if x != nil {
+		return x.Partial
+	}
+	return false
+}
+
 var File_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto protoreflect.FileDescriptor
 
 const file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDesc = "" +
@@ -2160,11 +2672,52 @@ const file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDesc = "" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12\x1f\n" +
 	"\vshard_count\x18\x02 \x01(\x04R\n" +
 	"shardCount\x12!\n" +
-	"\fleader_count\x18\x03 \x01(\x04R\vleaderCount*R\n" +
+	"\fleader_count\x18\x03 \x01(\x04R\vleaderCount\"\xe3\x01\n" +
+	"\x06Record\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12'\n" +
+	"\x04kind\x18\x02 \x01(\x0e2\x13.zuul.v1.RecordKindR\x04kind\x12\x12\n" +
+	"\x04held\x18\x03 \x01(\bR\x04held\x12(\n" +
+	"\x10holder_client_id\x18\x04 \x01(\tR\x0eholderClientId\x12#\n" +
+	"\rfencing_token\x18\x05 \x01(\x04R\ffencingToken\x12\x1f\n" +
+	"\vqueue_depth\x18\x06 \x01(\rR\n" +
+	"queueDepth\x12\x1a\n" +
+	"\brevision\x18\a \x01(\x04R\brevision\"B\n" +
+	"\x12ListRecordsRequest\x12\x16\n" +
+	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x14\n" +
+	"\x05limit\x18\x02 \x01(\rR\x05limit\"`\n" +
+	"\x13ListRecordsResponse\x12)\n" +
+	"\arecords\x18\x01 \x03(\v2\x0f.zuul.v1.RecordR\arecords\x12\x1e\n" +
+	"\n" +
+	"namespaces\x18\x02 \x03(\tR\n" +
+	"namespaces\"e\n" +
+	"\tContender\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1a\n" +
+	"\bposition\x18\x02 \x01(\rR\bposition\x12\x1f\n" +
+	"\venqueue_seq\x18\x03 \x01(\x04R\n" +
+	"enqueueSeq\"E\n" +
+	"\bObserver\x12\x1a\n" +
+	"\bidentity\x18\x01 \x01(\tR\bidentity\x12\x1d\n" +
+	"\n" +
+	"replica_id\x18\x02 \x01(\x04R\treplicaId\"$\n" +
+	"\x10GetRecordRequest\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\"\xd1\x01\n" +
+	"\x11GetRecordResponse\x12'\n" +
+	"\x06record\x18\x01 \x01(\v2\x0f.zuul.v1.RecordR\x06record\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\x122\n" +
+	"\n" +
+	"contenders\x18\x03 \x03(\v2\x12.zuul.v1.ContenderR\n" +
+	"contenders\x12/\n" +
+	"\tobservers\x18\x04 \x03(\v2\x11.zuul.v1.ObserverR\tobservers\x12\x18\n" +
+	"\apartial\x18\x05 \x01(\bR\apartial*R\n" +
 	"\bReadMode\x12\x15\n" +
 	"\x11READ_MODE_UNKNOWN\x10\x00\x12\x1a\n" +
 	"\x16READ_MODE_LINEARIZABLE\x10\x01\x12\x13\n" +
-	"\x0fREAD_MODE_STALE\x10\x022Q\n" +
+	"\x0fREAD_MODE_STALE\x10\x02*U\n" +
+	"\n" +
+	"RecordKind\x12\x17\n" +
+	"\x13RECORD_KIND_UNKNOWN\x10\x00\x12\x14\n" +
+	"\x10RECORD_KIND_LOCK\x10\x01\x12\x18\n" +
+	"\x14RECORD_KIND_ELECTION\x10\x022Q\n" +
 	"\aSession\x12F\n" +
 	"\tKeepAlive\x12\x19.zuul.v1.KeepAliveRequest\x1a\x1a.zuul.v1.KeepAliveResponse(\x010\x012\xf1\x01\n" +
 	"\x06Locker\x123\n" +
@@ -2184,7 +2737,10 @@ const file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDesc = "" +
 	"\n" +
 	"RemoveNode\x12\x1a.zuul.v1.RemoveNodeRequest\x1a\x1b.zuul.v1.RemoveNodeResponse\x129\n" +
 	"\x06Shards\x12\x16.zuul.v1.ShardsRequest\x1a\x17.zuul.v1.ShardsResponse\x129\n" +
-	"\x06Health\x12\x16.zuul.v1.HealthRequest\x1a\x17.zuul.v1.HealthResponseB2Z0github.com/johnsiilver/zuul/proto/zuul/v1;zuulv1b\x06proto3"
+	"\x06Health\x12\x16.zuul.v1.HealthRequest\x1a\x17.zuul.v1.HealthResponse2\x96\x01\n" +
+	"\x06Browse\x12H\n" +
+	"\vListRecords\x12\x1b.zuul.v1.ListRecordsRequest\x1a\x1c.zuul.v1.ListRecordsResponse\x12B\n" +
+	"\tGetRecord\x12\x19.zuul.v1.GetRecordRequest\x1a\x1a.zuul.v1.GetRecordResponseB2Z0github.com/johnsiilver/zuul/proto/zuul/v1;zuulv1b\x06proto3"
 
 var (
 	file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescOnce sync.Once
@@ -2198,86 +2754,103 @@ func file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescGZIP() []b
 	return file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDescData
 }
 
-var file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_goTypes = []any{
-	(ReadMode)(0),              // 0: zuul.v1.ReadMode
-	(*KeepAliveRequest)(nil),   // 1: zuul.v1.KeepAliveRequest
-	(*KeepAliveResponse)(nil),  // 2: zuul.v1.KeepAliveResponse
-	(*LockRequest)(nil),        // 3: zuul.v1.LockRequest
-	(*LockResponse)(nil),       // 4: zuul.v1.LockResponse
-	(*TryLockRequest)(nil),     // 5: zuul.v1.TryLockRequest
-	(*TryLockResponse)(nil),    // 6: zuul.v1.TryLockResponse
-	(*UnlockRequest)(nil),      // 7: zuul.v1.UnlockRequest
-	(*UnlockResponse)(nil),     // 8: zuul.v1.UnlockResponse
-	(*StatusRequest)(nil),      // 9: zuul.v1.StatusRequest
-	(*StatusResponse)(nil),     // 10: zuul.v1.StatusResponse
-	(*CampaignRequest)(nil),    // 11: zuul.v1.CampaignRequest
-	(*CampaignResponse)(nil),   // 12: zuul.v1.CampaignResponse
-	(*ProclaimRequest)(nil),    // 13: zuul.v1.ProclaimRequest
-	(*ProclaimResponse)(nil),   // 14: zuul.v1.ProclaimResponse
-	(*LeaderRequest)(nil),      // 15: zuul.v1.LeaderRequest
-	(*LeaderResponse)(nil),     // 16: zuul.v1.LeaderResponse
-	(*ObserveRequest)(nil),     // 17: zuul.v1.ObserveRequest
-	(*LeaderEvent)(nil),        // 18: zuul.v1.LeaderEvent
-	(*ResignRequest)(nil),      // 19: zuul.v1.ResignRequest
-	(*ResignResponse)(nil),     // 20: zuul.v1.ResignResponse
-	(*Endpoint)(nil),           // 21: zuul.v1.Endpoint
-	(*Member)(nil),             // 22: zuul.v1.Member
-	(*MembersRequest)(nil),     // 23: zuul.v1.MembersRequest
-	(*MembersResponse)(nil),    // 24: zuul.v1.MembersResponse
-	(*AddNodeRequest)(nil),     // 25: zuul.v1.AddNodeRequest
-	(*AddNodeResponse)(nil),    // 26: zuul.v1.AddNodeResponse
-	(*RemoveNodeRequest)(nil),  // 27: zuul.v1.RemoveNodeRequest
-	(*RemoveNodeResponse)(nil), // 28: zuul.v1.RemoveNodeResponse
-	(*ShardsRequest)(nil),      // 29: zuul.v1.ShardsRequest
-	(*ShardsResponse)(nil),     // 30: zuul.v1.ShardsResponse
-	(*ShardInfo)(nil),          // 31: zuul.v1.ShardInfo
-	(*HealthRequest)(nil),      // 32: zuul.v1.HealthRequest
-	(*HealthResponse)(nil),     // 33: zuul.v1.HealthResponse
-	(*anypb.Any)(nil),          // 34: google.protobuf.Any
+	(ReadMode)(0),               // 0: zuul.v1.ReadMode
+	(RecordKind)(0),             // 1: zuul.v1.RecordKind
+	(*KeepAliveRequest)(nil),    // 2: zuul.v1.KeepAliveRequest
+	(*KeepAliveResponse)(nil),   // 3: zuul.v1.KeepAliveResponse
+	(*LockRequest)(nil),         // 4: zuul.v1.LockRequest
+	(*LockResponse)(nil),        // 5: zuul.v1.LockResponse
+	(*TryLockRequest)(nil),      // 6: zuul.v1.TryLockRequest
+	(*TryLockResponse)(nil),     // 7: zuul.v1.TryLockResponse
+	(*UnlockRequest)(nil),       // 8: zuul.v1.UnlockRequest
+	(*UnlockResponse)(nil),      // 9: zuul.v1.UnlockResponse
+	(*StatusRequest)(nil),       // 10: zuul.v1.StatusRequest
+	(*StatusResponse)(nil),      // 11: zuul.v1.StatusResponse
+	(*CampaignRequest)(nil),     // 12: zuul.v1.CampaignRequest
+	(*CampaignResponse)(nil),    // 13: zuul.v1.CampaignResponse
+	(*ProclaimRequest)(nil),     // 14: zuul.v1.ProclaimRequest
+	(*ProclaimResponse)(nil),    // 15: zuul.v1.ProclaimResponse
+	(*LeaderRequest)(nil),       // 16: zuul.v1.LeaderRequest
+	(*LeaderResponse)(nil),      // 17: zuul.v1.LeaderResponse
+	(*ObserveRequest)(nil),      // 18: zuul.v1.ObserveRequest
+	(*LeaderEvent)(nil),         // 19: zuul.v1.LeaderEvent
+	(*ResignRequest)(nil),       // 20: zuul.v1.ResignRequest
+	(*ResignResponse)(nil),      // 21: zuul.v1.ResignResponse
+	(*Endpoint)(nil),            // 22: zuul.v1.Endpoint
+	(*Member)(nil),              // 23: zuul.v1.Member
+	(*MembersRequest)(nil),      // 24: zuul.v1.MembersRequest
+	(*MembersResponse)(nil),     // 25: zuul.v1.MembersResponse
+	(*AddNodeRequest)(nil),      // 26: zuul.v1.AddNodeRequest
+	(*AddNodeResponse)(nil),     // 27: zuul.v1.AddNodeResponse
+	(*RemoveNodeRequest)(nil),   // 28: zuul.v1.RemoveNodeRequest
+	(*RemoveNodeResponse)(nil),  // 29: zuul.v1.RemoveNodeResponse
+	(*ShardsRequest)(nil),       // 30: zuul.v1.ShardsRequest
+	(*ShardsResponse)(nil),      // 31: zuul.v1.ShardsResponse
+	(*ShardInfo)(nil),           // 32: zuul.v1.ShardInfo
+	(*HealthRequest)(nil),       // 33: zuul.v1.HealthRequest
+	(*HealthResponse)(nil),      // 34: zuul.v1.HealthResponse
+	(*Record)(nil),              // 35: zuul.v1.Record
+	(*ListRecordsRequest)(nil),  // 36: zuul.v1.ListRecordsRequest
+	(*ListRecordsResponse)(nil), // 37: zuul.v1.ListRecordsResponse
+	(*Contender)(nil),           // 38: zuul.v1.Contender
+	(*Observer)(nil),            // 39: zuul.v1.Observer
+	(*GetRecordRequest)(nil),    // 40: zuul.v1.GetRecordRequest
+	(*GetRecordResponse)(nil),   // 41: zuul.v1.GetRecordResponse
+	(*anypb.Any)(nil),           // 42: google.protobuf.Any
 }
 var file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_depIdxs = []int32{
 	0,  // 0: zuul.v1.StatusRequest.read_mode:type_name -> zuul.v1.ReadMode
 	0,  // 1: zuul.v1.LeaderRequest.read_mode:type_name -> zuul.v1.ReadMode
-	34, // 2: zuul.v1.Endpoint.metadata:type_name -> google.protobuf.Any
-	22, // 3: zuul.v1.MembersResponse.members:type_name -> zuul.v1.Member
-	31, // 4: zuul.v1.ShardsResponse.shards:type_name -> zuul.v1.ShardInfo
-	1,  // 5: zuul.v1.Session.KeepAlive:input_type -> zuul.v1.KeepAliveRequest
-	3,  // 6: zuul.v1.Locker.Lock:input_type -> zuul.v1.LockRequest
-	5,  // 7: zuul.v1.Locker.TryLock:input_type -> zuul.v1.TryLockRequest
-	7,  // 8: zuul.v1.Locker.Unlock:input_type -> zuul.v1.UnlockRequest
-	9,  // 9: zuul.v1.Locker.Status:input_type -> zuul.v1.StatusRequest
-	11, // 10: zuul.v1.Election.Campaign:input_type -> zuul.v1.CampaignRequest
-	13, // 11: zuul.v1.Election.Proclaim:input_type -> zuul.v1.ProclaimRequest
-	15, // 12: zuul.v1.Election.Leader:input_type -> zuul.v1.LeaderRequest
-	17, // 13: zuul.v1.Election.Observe:input_type -> zuul.v1.ObserveRequest
-	19, // 14: zuul.v1.Election.Resign:input_type -> zuul.v1.ResignRequest
-	23, // 15: zuul.v1.Cluster.Members:input_type -> zuul.v1.MembersRequest
-	25, // 16: zuul.v1.Cluster.AddNode:input_type -> zuul.v1.AddNodeRequest
-	27, // 17: zuul.v1.Cluster.RemoveNode:input_type -> zuul.v1.RemoveNodeRequest
-	29, // 18: zuul.v1.Cluster.Shards:input_type -> zuul.v1.ShardsRequest
-	32, // 19: zuul.v1.Cluster.Health:input_type -> zuul.v1.HealthRequest
-	2,  // 20: zuul.v1.Session.KeepAlive:output_type -> zuul.v1.KeepAliveResponse
-	4,  // 21: zuul.v1.Locker.Lock:output_type -> zuul.v1.LockResponse
-	6,  // 22: zuul.v1.Locker.TryLock:output_type -> zuul.v1.TryLockResponse
-	8,  // 23: zuul.v1.Locker.Unlock:output_type -> zuul.v1.UnlockResponse
-	10, // 24: zuul.v1.Locker.Status:output_type -> zuul.v1.StatusResponse
-	12, // 25: zuul.v1.Election.Campaign:output_type -> zuul.v1.CampaignResponse
-	14, // 26: zuul.v1.Election.Proclaim:output_type -> zuul.v1.ProclaimResponse
-	16, // 27: zuul.v1.Election.Leader:output_type -> zuul.v1.LeaderResponse
-	18, // 28: zuul.v1.Election.Observe:output_type -> zuul.v1.LeaderEvent
-	20, // 29: zuul.v1.Election.Resign:output_type -> zuul.v1.ResignResponse
-	24, // 30: zuul.v1.Cluster.Members:output_type -> zuul.v1.MembersResponse
-	26, // 31: zuul.v1.Cluster.AddNode:output_type -> zuul.v1.AddNodeResponse
-	28, // 32: zuul.v1.Cluster.RemoveNode:output_type -> zuul.v1.RemoveNodeResponse
-	30, // 33: zuul.v1.Cluster.Shards:output_type -> zuul.v1.ShardsResponse
-	33, // 34: zuul.v1.Cluster.Health:output_type -> zuul.v1.HealthResponse
-	20, // [20:35] is the sub-list for method output_type
-	5,  // [5:20] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	42, // 2: zuul.v1.Endpoint.metadata:type_name -> google.protobuf.Any
+	23, // 3: zuul.v1.MembersResponse.members:type_name -> zuul.v1.Member
+	32, // 4: zuul.v1.ShardsResponse.shards:type_name -> zuul.v1.ShardInfo
+	1,  // 5: zuul.v1.Record.kind:type_name -> zuul.v1.RecordKind
+	35, // 6: zuul.v1.ListRecordsResponse.records:type_name -> zuul.v1.Record
+	35, // 7: zuul.v1.GetRecordResponse.record:type_name -> zuul.v1.Record
+	38, // 8: zuul.v1.GetRecordResponse.contenders:type_name -> zuul.v1.Contender
+	39, // 9: zuul.v1.GetRecordResponse.observers:type_name -> zuul.v1.Observer
+	2,  // 10: zuul.v1.Session.KeepAlive:input_type -> zuul.v1.KeepAliveRequest
+	4,  // 11: zuul.v1.Locker.Lock:input_type -> zuul.v1.LockRequest
+	6,  // 12: zuul.v1.Locker.TryLock:input_type -> zuul.v1.TryLockRequest
+	8,  // 13: zuul.v1.Locker.Unlock:input_type -> zuul.v1.UnlockRequest
+	10, // 14: zuul.v1.Locker.Status:input_type -> zuul.v1.StatusRequest
+	12, // 15: zuul.v1.Election.Campaign:input_type -> zuul.v1.CampaignRequest
+	14, // 16: zuul.v1.Election.Proclaim:input_type -> zuul.v1.ProclaimRequest
+	16, // 17: zuul.v1.Election.Leader:input_type -> zuul.v1.LeaderRequest
+	18, // 18: zuul.v1.Election.Observe:input_type -> zuul.v1.ObserveRequest
+	20, // 19: zuul.v1.Election.Resign:input_type -> zuul.v1.ResignRequest
+	24, // 20: zuul.v1.Cluster.Members:input_type -> zuul.v1.MembersRequest
+	26, // 21: zuul.v1.Cluster.AddNode:input_type -> zuul.v1.AddNodeRequest
+	28, // 22: zuul.v1.Cluster.RemoveNode:input_type -> zuul.v1.RemoveNodeRequest
+	30, // 23: zuul.v1.Cluster.Shards:input_type -> zuul.v1.ShardsRequest
+	33, // 24: zuul.v1.Cluster.Health:input_type -> zuul.v1.HealthRequest
+	36, // 25: zuul.v1.Browse.ListRecords:input_type -> zuul.v1.ListRecordsRequest
+	40, // 26: zuul.v1.Browse.GetRecord:input_type -> zuul.v1.GetRecordRequest
+	3,  // 27: zuul.v1.Session.KeepAlive:output_type -> zuul.v1.KeepAliveResponse
+	5,  // 28: zuul.v1.Locker.Lock:output_type -> zuul.v1.LockResponse
+	7,  // 29: zuul.v1.Locker.TryLock:output_type -> zuul.v1.TryLockResponse
+	9,  // 30: zuul.v1.Locker.Unlock:output_type -> zuul.v1.UnlockResponse
+	11, // 31: zuul.v1.Locker.Status:output_type -> zuul.v1.StatusResponse
+	13, // 32: zuul.v1.Election.Campaign:output_type -> zuul.v1.CampaignResponse
+	15, // 33: zuul.v1.Election.Proclaim:output_type -> zuul.v1.ProclaimResponse
+	17, // 34: zuul.v1.Election.Leader:output_type -> zuul.v1.LeaderResponse
+	19, // 35: zuul.v1.Election.Observe:output_type -> zuul.v1.LeaderEvent
+	21, // 36: zuul.v1.Election.Resign:output_type -> zuul.v1.ResignResponse
+	25, // 37: zuul.v1.Cluster.Members:output_type -> zuul.v1.MembersResponse
+	27, // 38: zuul.v1.Cluster.AddNode:output_type -> zuul.v1.AddNodeResponse
+	29, // 39: zuul.v1.Cluster.RemoveNode:output_type -> zuul.v1.RemoveNodeResponse
+	31, // 40: zuul.v1.Cluster.Shards:output_type -> zuul.v1.ShardsResponse
+	34, // 41: zuul.v1.Cluster.Health:output_type -> zuul.v1.HealthResponse
+	37, // 42: zuul.v1.Browse.ListRecords:output_type -> zuul.v1.ListRecordsResponse
+	41, // 43: zuul.v1.Browse.GetRecord:output_type -> zuul.v1.GetRecordResponse
+	27, // [27:44] is the sub-list for method output_type
+	10, // [10:27] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_init() }
@@ -2290,10 +2863,10 @@ func file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDesc), len(file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   33,
+			NumEnums:      2,
+			NumMessages:   40,
 			NumExtensions: 0,
-			NumServices:   4,
+			NumServices:   5,
 		},
 		GoTypes:           file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_goTypes,
 		DependencyIndexes: file_github_com_johnsiilver_zuul_proto_zuul_v1_zuul_proto_depIdxs,

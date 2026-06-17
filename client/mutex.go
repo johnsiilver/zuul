@@ -3,7 +3,7 @@ package client
 import (
 	"time"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )

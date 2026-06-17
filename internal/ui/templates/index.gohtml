@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Zuul Browser</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Zuul</h1>
+    <form class="search" id="search" action="/" method="get">
+      <input type="text" name="ns" value="{{.NS}}" placeholder="namespace prefix, e.g. /user or /user/dir" autocomplete="off">
+      <button type="submit">Search</button>
+    </form>
+    <button type="button" class="refresh" onclick="zuulRefresh()">Refresh</button>
+  </header>
+
+  <main id="panes">
+    <section class="pane namespaces" id="pane-namespaces">{{template "ns-pane" .}}</section>
+    <section class="pane records" id="pane-records">{{template "records-pane" .}}</section>
+    <section class="pane detail" id="pane-detail">{{template "detail-pane" .}}</section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+
+{{define "ns-pane"}}
+<h2>Namespaces</h2>
+<ul id="ns-list">
+  {{range .Namespaces}}
+  <li{{if eq $.NS (printf "/%s" .)}} class="selected"{{end}}><a href="/?ns=/{{.}}" class="ns-link" data-ns="/{{.}}">/{{.}}</a></li>
+  {{else}}
+  <li class="empty">none</li>
+  {{end}}
+</ul>
+{{end}}
+
+{{define "records-pane"}}
+<h2>Records{{if .NS}} under {{.NS}}{{end}}</h2>
+{{if .NS}}
+<ul>
+  {{range .Records}}
+  <li{{if .Selected}} class="selected"{{end}}>
+    <a href="/?ns={{$.NS}}&amp;rec={{.Key}}" class="rec-link" data-rec="{{.Key}}">
+      <span class="kind {{.Kind}}">{{.Kind}}</span>
+      <span class="key">{{.Key}}</span>
+      <span class="holder">{{if .Holder}}held by {{.Holder}}{{else}}free{{end}}</span>
+      {{if .QueueDepth}}<span class="queue">+{{.QueueDepth}} waiting</span>{{end}}
+    </a>
+  </li>
+  {{else}}
+  <li class="empty">no records</li>
+  {{end}}
+</ul>
+{{else}}
+<p class="hint">Select a namespace.</p>
+{{end}}
+{{end}}
+
+{{define "detail-pane"}}
+<h2>Detail</h2>
+{{with .Detail}}
+<dl>
+  <dt>Key</dt><dd>{{.Key}}</dd>
+  <dt>Kind</dt><dd>{{.Kind}}</dd>
+  <dt>Held</dt><dd>{{if .Held}}yes{{else}}no{{end}}</dd>
+  <dt>{{if eq .Kind "election"}}Leader{{else}}Holder{{end}}</dt><dd>{{if .Holder}}{{.Holder}}{{else}}—{{end}}</dd>
+  <dt>Fencing token</dt><dd>{{.Token}}</dd>
+  {{if eq .Kind "election"}}<dt>Value</dt><dd class="value">{{.Value}}</dd>{{end}}
+</dl>
+
+<h3>Contenders ({{len .Contenders}})</h3>
+{{if .Contenders}}
+<ol>
+  {{range .Contenders}}<li>#{{.Position}} {{.ClientID}}</li>{{end}}
+</ol>
+{{else}}<p class="empty">none</p>{{end}}
+
+<h3>Observers ({{len .Observers}}){{if .Partial}} <span class="partial">partial</span>{{end}}</h3>
+{{if .Observers}}
+<ul>
+  {{range .Observers}}<li>{{if .Identity}}{{.Identity}}{{else}}(anonymous){{end}} <span class="node">@node {{.ReplicaID}}</span></li>{{end}}
+</ul>
+{{else}}<p class="empty">none</p>{{end}}
+{{else}}
+<p class="hint">Select a record.</p>
+{{end}}
+{{end}}

@@ -47,9 +47,9 @@ func output(name string, args ...string) (string, error) {
 func Gen() error {
 	dirs := []string{
 		"proto/zuul/v1",
-		"internal/forward/forwardpb",
-		"internal/meta/metapb",
-		"internal/fsm/fsmpb",
+		"internal/raft/forward/forwardpb",
+		"internal/raft/meta/metapb",
+		"internal/raft/fsm/fsmpb",
 	}
 	for _, d := range dirs {
 		if err := runIn(d, "bufme"); err != nil {

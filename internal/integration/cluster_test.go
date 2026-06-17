@@ -12,14 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/consensus"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/cluster/router"
+	"github.com/johnsiilver/zuul/internal/lock/session"
 	zuulnode "github.com/johnsiilver/zuul/internal/node"
-	"github.com/johnsiilver/zuul/internal/router"
+	"github.com/johnsiilver/zuul/internal/raft/consensus"
 	"github.com/johnsiilver/zuul/internal/server"
-	"github.com/johnsiilver/zuul/internal/session"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
 
@@ -48,17 +48,19 @@ type tlsPaths struct {
 
 // cluster is an in-process Zuul cluster that can grow and shrink at runtime.
 type cluster struct {
-	nodes      []*node
-	shards     []uint64
-	router     *router.Router
-	members    map[uint64]string // replica id -> raft address
-	grpcAddrs  map[uint64]string // replica id -> forwarding/grpc address
-	gossip     map[uint64]string // replica id -> gossip address (gossip mode only)
-	useGossip  bool
-	authorizer authz.Authorizer
-	nextID     uint64
-	now        func() int64
-	tls        *tlsPaths // nil => insecure
+	nodes       []*node
+	shards      []uint64
+	router      *router.Router
+	members     map[uint64]string // replica id -> raft address
+	grpcAddrs   map[uint64]string // replica id -> forwarding/grpc address
+	gossip      map[uint64]string // replica id -> gossip address (gossip mode only)
+	useGossip   bool
+	authorizer  authz.Authorizer
+	nextID      uint64
+	now         func() int64
+	expiry      time.Duration // 0 => node default (1s)
+	snapEntries uint64        // Raft SnapshotEntries; 0 => node default (1000)
+	tls         *tlsPaths     // nil => insecure
 }
 
 // clusterOpts configures a test cluster.
@@ -66,6 +68,15 @@ type clusterOpts struct {
 	tls        *tlsPaths
 	gossip     bool
 	authorizer authz.Authorizer
+	// now, when non-nil, is the cluster clock. The default deterministic harness pins a
+	// frozen clock (testNow) so no lease ever expires; pass a real clock (e.g.
+	// newRealClockCluster) when a test needs lease expiry to actually fire.
+	now func() int64
+	// expiry overrides the leader-side lease-expiry sweep interval (0 => node default 1s).
+	expiry time.Duration
+	// snapEntries overrides Raft SnapshotEntries (how many log entries trigger a snapshot +
+	// compaction); 0 => node default (1000). Lower values truncate the in-RAM log sooner.
+	snapEntries uint64
 }
 
 // newCluster boots an insecure in-process cluster.
@@ -89,6 +100,21 @@ func newGossipCluster(t testing.TB, numNodes, numShards int, tls *tlsPaths) *clu
 	return buildCluster(t, numNodes, numShards, clusterOpts{tls: tls, gossip: true})
 }
 
+// newRealClockCluster boots an insecure cluster driven by the real wall clock, so the
+// leader-side lease-expiry sweep actually reaps lapsed sessions (the frozen testNow
+// clock used by newCluster never expires anything). expiry overrides the sweep interval
+// (0 => node default 1s). Long-running / lease-expiry tests use this.
+func newRealClockCluster(t testing.TB, numNodes, numShards int, expiry time.Duration) *cluster {
+	return buildCluster(t, numNodes, numShards, clusterOpts{now: func() int64 { return time.Now().UnixNano() }, expiry: expiry})
+}
+
+// newSoakCluster boots a real-clock cluster with a tunable Raft SnapshotEntries (0 => node
+// default 1000). The leak soak uses it to test whether more aggressive log truncation
+// bounds the in-RAM LogDB's memory growth.
+func newSoakCluster(t testing.TB, numNodes, numShards int, expiry time.Duration, snapEntries uint64) *cluster {
+	return buildCluster(t, numNodes, numShards, clusterOpts{now: func() int64 { return time.Now().UnixNano() }, expiry: expiry, snapEntries: snapEntries})
+}
+
 // buildCluster boots numNodes fully-replicated members over numShards lock shards (plus
 // the meta shard), each through the production node.New path, and waits for the meta
 // shard to record every node. opts.tls runs mutual TLS on every plane; opts.gossip
@@ -106,17 +132,23 @@ func buildCluster(t testing.TB, numNodes, numShards int, opts clusterOpts) *clus
 		t.Fatalf("buildCluster: router.New: %s", err)
 	}
 
+	now := opts.now
+	if now == nil {
+		now = func() int64 { return testNow }
+	}
 	c := &cluster{
-		shards:     shards,
-		router:     r,
-		members:    map[uint64]string{},
-		grpcAddrs:  map[uint64]string{},
-		gossip:     map[uint64]string{},
-		useGossip:  opts.gossip,
-		nextID:     uint64(numNodes) + 1,
-		now:        func() int64 { return testNow },
-		tls:        opts.tls,
-		authorizer: opts.authorizer,
+		shards:      shards,
+		router:      r,
+		members:     map[uint64]string{},
+		grpcAddrs:   map[uint64]string{},
+		gossip:      map[uint64]string{},
+		useGossip:   opts.gossip,
+		nextID:      uint64(numNodes) + 1,
+		now:         now,
+		expiry:      opts.expiry,
+		snapEntries: opts.snapEntries,
+		tls:         opts.tls,
+		authorizer:  opts.authorizer,
 	}
 
 	// Boot the cluster, retrying on a transient port collision. freePort hands out a
@@ -219,19 +251,21 @@ func (c *cluster) bootNodes(ctx context.Context, numNodes int, dbMembers map[uin
 func (c *cluster) baseConfig(id uint64) zuulnode.Config {
 	mtls, caFile, certFile, keyFile := c.tlsFields()
 	return zuulnode.Config{
-		ReplicaID:   id,
-		RaftAddr:    c.members[id],
-		GRPCAddr:    c.grpcAddrs[id],
-		DataDir:     fmt.Sprintf("zuul-node-%d", id),
-		Shards:      c.shards,
-		MetaShardID: metaShardID,
-		Seed:        c.grpcAddrs,
-		MutualTLS:   mtls,
-		CAFile:      caFile,
-		CertFile:    certFile,
-		KeyFile:     keyFile,
-		Now:         c.now,
-		Authorizer:  c.authorizer,
+		ReplicaID:       id,
+		RaftAddr:        c.members[id],
+		GRPCAddr:        c.grpcAddrs[id],
+		DataDir:         fmt.Sprintf("zuul-node-%d", id),
+		Shards:          c.shards,
+		MetaShardID:     metaShardID,
+		Seed:            c.grpcAddrs,
+		MutualTLS:       mtls,
+		CAFile:          caFile,
+		CertFile:        certFile,
+		KeyFile:         keyFile,
+		Now:             c.now,
+		ExpiryInterval:  c.expiry,
+		SnapshotEntries: c.snapEntries,
+		Authorizer:      c.authorizer,
 	}
 }
 
@@ -348,6 +382,76 @@ func (c *cluster) removeNode(t *testing.T, target *node) {
 		}
 	}
 	c.nodes = live
+}
+
+// restartNode models a node restart: it kills target (a hard crash when hard is set,
+// else a graceful drain+close), removes the dead replica from the cluster config, then
+// admits a fresh replica reusing target's gRPC port (a fresh Raft port). The in-memory
+// store makes a restart amnesiac, so this is a remove + fresh-join — the only supported
+// re-add path (see TestAmnesiacReAdd). Reusing the gRPC port keeps any client's static
+// Endpoints valid across the restart. It returns the new node.
+//
+// Unlike addNode it does NOT register a t.Cleanup for the returned node: the CALLER owns
+// its lifetime (it is in c.nodes). A long run that restarts repeatedly must close the
+// current c.nodes itself at teardown — registering a cleanup per restart would pin every
+// closed node (and its in-memory Raft-log FS) until the test ends, which over thousands
+// of restarts looks like a memory leak. removeNode has already closed the old replica, so
+// it is unreferenced and collectable.
+func (c *cluster) restartNode(t *testing.T, target *node, hard bool) *node {
+	t.Helper()
+	ctx := t.Context()
+	grpcAddr := c.grpcAddrs[target.replicaID] // reused so client endpoints stay valid
+
+	switch {
+	case hard:
+		target.n.Stop() // abrupt: cut streams, model a crash
+	default:
+		// Graceful: Drain transfers Raft leadership cleanly, then Stop ends serving. We use
+		// Stop, not Close: Close's GracefulStop waits for in-flight streams to end, but the
+		// long-lived client KeepAlive/Observe streams (gRPC pick_first pins every client to
+		// one node) never end on their own, so Close would block forever. This mirrors
+		// TestClientFailover (Drain + Stop). removeNode's later Close is then a no-op.
+		dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		target.n.Drain(dctx)
+		cancel()
+		target.n.Stop()
+	}
+	c.removeNode(t, target) // drop the dead replica from the raft config + c.nodes
+
+	id := c.nextID
+	c.nextID++
+	raftAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	c.members[id] = raftAddr
+	c.grpcAddrs[id] = grpcAddr
+
+	admit := c.nodes[0]
+	if _, err := admit.cluster.AddNode(ctx, &zuulv1.AddNodeRequest{ReplicaId: id, RaftAddress: raftAddr, ZuulGrpcAddress: grpcAddr}); err != nil {
+		t.Fatalf("restartNode: AddNode(%d): %s", id, err)
+	}
+
+	cfg := c.baseConfig(id)
+	cfg.Join = true
+
+	// The just-freed gRPC port can briefly fail to rebind while its socket lingers; retry
+	// a few times before giving up.
+	var n *node
+	var err error
+	for attempt := 1; attempt <= 10; attempt++ {
+		n, err = c.startNode(ctx, cfg)
+		if err == nil {
+			break
+		}
+		if !isTransientBind(err) {
+			t.Fatalf("restartNode: boot replica %d: %s", id, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("restartNode: replica %d never rebound %s: %s", id, grpcAddr, err)
+	}
+	c.nodes = append(c.nodes, n)
+	c.awaitMembership(t, len(c.nodes))
+	return n
 }
 
 // leaderReplica returns the replica id leading shardID (waiting briefly for one).

@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/errors"
 )

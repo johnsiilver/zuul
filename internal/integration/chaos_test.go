@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"github.com/anishathalye/porcupine"
-	"github.com/gostdlib/base/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/johnsiilver/zuul/context"
 
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )

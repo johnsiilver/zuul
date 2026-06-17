@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/client"
 	"github.com/johnsiilver/zuul/internal/node"

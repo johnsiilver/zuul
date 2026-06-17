@@ -17,13 +17,14 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/gostdlib/base/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/johnsiilver/zuul/context"
+
 	"github.com/johnsiilver/zuul/errors"
-	"github.com/johnsiilver/zuul/internal/zuultls"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
 

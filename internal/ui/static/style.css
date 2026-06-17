@@ -1,0 +1,70 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 14px/1.4 -apple-system, system-ui, sans-serif;
+  color: #1a1a1a;
+  background: #f5f6f8;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #1f2933;
+  color: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+header h1 { font-size: 18px; margin: 0; letter-spacing: 1px; }
+.search { display: flex; gap: 6px; flex: 1; }
+.search input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #3e4c59;
+  border-radius: 4px;
+  background: #fff;
+}
+button {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: #3b82f6;
+  color: #fff;
+  cursor: pointer;
+}
+button.refresh { background: #10b981; }
+button:hover { filter: brightness(1.05); }
+
+main {
+  display: grid;
+  grid-template-columns: 240px 1fr 1fr;
+  gap: 1px;
+  background: #d7dbe0;
+  height: calc(100vh - 56px);
+}
+.pane {
+  background: #fff;
+  overflow: auto;
+  padding: 12px 16px;
+}
+.pane h2 { font-size: 13px; text-transform: uppercase; color: #7b8794; margin: 0 0 10px; }
+.pane h3 { font-size: 12px; text-transform: uppercase; color: #7b8794; margin: 16px 0 6px; }
+ul, ol { list-style: none; margin: 0; padding: 0; }
+.records ol, .detail ol { padding-left: 18px; list-style: decimal; }
+li { padding: 4px 0; }
+a { color: #1f6feb; text-decoration: none; display: block; }
+a:hover { text-decoration: underline; }
+.records li.selected { background: #eef4ff; border-radius: 4px; }
+.records .kind, .detail .kind { font-size: 11px; padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+.kind.lock { background: #e0e7ff; color: #3730a3; }
+.kind.election { background: #fef3c7; color: #92400e; }
+.key { font-family: ui-monospace, Menlo, monospace; }
+.holder, .queue { color: #7b8794; font-size: 12px; margin-left: 6px; }
+.empty, .hint { color: #9aa5b1; font-style: italic; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+dt { color: #7b8794; }
+dd { margin: 0; font-family: ui-monospace, Menlo, monospace; }
+.value { white-space: pre-wrap; word-break: break-all; }
+.node { color: #9aa5b1; font-size: 12px; }
+.partial { color: #b45309; font-size: 11px; border: 1px solid #b45309; border-radius: 3px; padding: 0 4px; }

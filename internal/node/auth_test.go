@@ -5,21 +5,22 @@ import (
 	"crypto/x509"
 	"testing"
 
-	"github.com/gostdlib/base/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/zuultls/zuultlstest"
+	"github.com/johnsiilver/zuul/context"
+
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls/zuultlstest"
 )
 
 // TestBearerCaseInsensitive proves the bearer scheme is matched case-insensitively
 // (RFC 7235), and the token still validates regardless of "Bearer"/"bearer"/"BEARER".
 func TestBearerCaseInsensitive(t *testing.T) {
-	b := &bearerAuth{tokens: map[string]string{"sekrit": "orders-svc"}}
+	b := &bearerAuth{tokens: hashTokens(map[string]string{"sekrit": "orders-svc"})}
 	tests := []struct {
 		name    string
 		header  string
@@ -66,7 +67,7 @@ func TestReconcileUser(t *testing.T) {
 			ctx = metadata.NewIncomingContext(ctx, metadata.Pairs(authz.UserHeader, test.header))
 		}
 		if test.authID != "" {
-			ctx = authz.WithIdentity(ctx, test.authID)
+			ctx = context.WithIdentity(ctx, test.authID)
 		}
 		got, err := reconcileUser(ctx)
 		switch {
@@ -82,7 +83,7 @@ func TestReconcileUser(t *testing.T) {
 			}
 			continue
 		}
-		if id, _ := authz.IdentityFromContext(got); id != test.wantID {
+		if id, _ := context.IdentityFromContext(got); id != test.wantID {
 			t.Errorf("TestReconcileUser(%s): principal = %q, want %q", test.name, id, test.wantID)
 		}
 	}
@@ -104,7 +105,7 @@ func TestReconcileUserMTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestReconcileUserMTLS: matching header: got err == %s, want nil", err)
 	}
-	if id, _ := authz.IdentityFromContext(got); id != "alice" {
+	if id, _ := context.IdentityFromContext(got); id != "alice" {
 		t.Errorf("TestReconcileUserMTLS: principal = %q, want alice", id)
 	}
 }

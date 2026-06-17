@@ -3,12 +3,14 @@ package server
 import (
 	"fmt"
 
-	"github.com/gostdlib/base/context"
+	"github.com/gostdlib/base/values/immutable"
 	"google.golang.org/grpc"
 
+	"github.com/johnsiilver/zuul/context"
+
 	"github.com/johnsiilver/zuul/errors"
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/meta/metapb"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/raft/meta/metapb"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
 
@@ -24,7 +26,7 @@ type ClusterReader interface {
 	// ReplicaID is this node's replica id.
 	ReplicaID() uint64
 	// Hosted returns every shard id this node hosts.
-	Hosted() []uint64
+	Hosted() immutable.Slice[uint64]
 	// LeaderID returns the replica id leading shardID, and whether one is known.
 	LeaderID(shardID uint64) (uint64, bool)
 	// MetaList returns every cluster member from the meta shard.
@@ -73,7 +75,7 @@ func NewClusterServer(cfg ClusterConfig) *ClusterServer {
 
 // authorize checks the caller's identity against the cluster admin namespace.
 func (c *ClusterServer) authorize(ctx context.Context, op authz.Op) error {
-	identity, _ := authz.IdentityFromContext(ctx)
+	identity, _ := context.IdentityFromContext(ctx)
 	if err := c.cfg.Authorizer.Authorize(identity, clusterKey, op); err != nil {
 		return errors.E(ctx, errors.CatPermission, errors.TypeUnauthorizedCluster, fmt.Errorf("client %q is not authorized for cluster administration", identity))
 	}
@@ -112,7 +114,7 @@ func (c *ClusterServer) Shards(ctx context.Context, _ *zuulv1.ShardsRequest) (*z
 		return nil, err
 	}
 	out := &zuulv1.ShardsResponse{}
-	for _, shardID := range c.cfg.Host.Hosted() {
+	for _, shardID := range c.cfg.Host.Hosted().All() {
 		info := &zuulv1.ShardInfo{ShardId: shardID}
 		if id, ok := c.cfg.Host.LeaderID(shardID); ok {
 			info.LeaderReplicaId = id
@@ -126,12 +128,12 @@ func (c *ClusterServer) Shards(ctx context.Context, _ *zuulv1.ShardsRequest) (*z
 func (c *ClusterServer) Health(_ context.Context, _ *zuulv1.HealthRequest) (*zuulv1.HealthResponse, error) {
 	hosted := c.cfg.Host.Hosted()
 	var leaders uint64
-	for _, shardID := range hosted {
+	for _, shardID := range hosted.All() {
 		if id, ok := c.cfg.Host.LeaderID(shardID); ok && id == c.cfg.Host.ReplicaID() {
 			leaders++
 		}
 	}
-	return &zuulv1.HealthResponse{Healthy: true, ShardCount: uint64(len(hosted)), LeaderCount: leaders}, nil
+	return &zuulv1.HealthResponse{Healthy: true, ShardCount: uint64(hosted.Len()), LeaderCount: leaders}, nil
 }
 
 // AddNode adds a replica to every shard (each change routed to that shard's leader)
@@ -148,7 +150,7 @@ func (c *ClusterServer) AddNode(ctx context.Context, req *zuulv1.AddNodeRequest)
 		return nil, errors.E(ctx, errors.CatRequest, errors.TypeBadRequest, errors.New("replica_id and raft_address are required"))
 	}
 	g := context.Pool(ctx).Group()
-	for _, shardID := range c.cfg.Host.Hosted() {
+	for _, shardID := range c.cfg.Host.Hosted().All() {
 		shardID := shardID
 		g.Go(ctx, func(ctx context.Context) error {
 			return c.cfg.Members.AddReplica(ctx, shardID, req.GetReplicaId(), req.GetRaftAddress())
@@ -175,7 +177,7 @@ func (c *ClusterServer) RemoveNode(ctx context.Context, req *zuulv1.RemoveNodeRe
 		return nil, errors.E(ctx, errors.CatRequest, errors.TypeBadRequest, errors.New("replica_id is required"))
 	}
 	g := context.Pool(ctx).Group()
-	for _, shardID := range c.cfg.Host.Hosted() {
+	for _, shardID := range c.cfg.Host.Hosted().All() {
 		shardID := shardID
 		g.Go(ctx, func(ctx context.Context) error {
 			return c.cfg.Members.RemoveReplica(ctx, shardID, req.GetReplicaId())
@@ -200,7 +202,7 @@ func (c *ClusterServer) putMember(ctx context.Context, req *zuulv1.AddNodeReques
 	}
 	b, err := (&metapb.MetaCommand{Cmd: &metapb.MetaCommand_Put{Put: member}}).MarshalVT()
 	if err != nil {
-		return fmt.Errorf("cluster.AddNode: marshal member: %w", err)
+		return errors.E(ctx, errors.CatInternal, errors.TypeMarshal, fmt.Errorf("cluster.AddNode: marshal member: %w", err))
 	}
 	_, err = c.cfg.Proposer.Propose(ctx, c.cfg.MetaShardID, b)
 	return err
@@ -210,7 +212,7 @@ func (c *ClusterServer) putMember(ctx context.Context, req *zuulv1.AddNodeReques
 func (c *ClusterServer) deleteMember(ctx context.Context, replicaID uint64) error {
 	b, err := (&metapb.MetaCommand{Cmd: &metapb.MetaCommand_Delete{Delete: replicaID}}).MarshalVT()
 	if err != nil {
-		return fmt.Errorf("cluster.RemoveNode: marshal delete: %w", err)
+		return errors.E(ctx, errors.CatInternal, errors.TypeMarshal, fmt.Errorf("cluster.RemoveNode: marshal delete: %w", err))
 	}
 	_, err = c.cfg.Proposer.Propose(ctx, c.cfg.MetaShardID, b)
 	return err

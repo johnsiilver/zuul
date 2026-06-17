@@ -6,8 +6,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/consensus"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/raft/consensus"
 )
 
 // fileConfig is the JSON shape of --config. When --config is given it fully defines
@@ -54,6 +54,10 @@ type fileConfig struct {
 	SnapshotEntries    uint64 `json:"snapshotEntries"`
 	CompactionOverhead uint64 `json:"compactionOverhead"`
 	MaxRecvBytes       int    `json:"maxRecvBytes"`
+
+	UIEnable bool   `json:"uiEnable"`
+	UIBind   string `json:"uiBind"`
+	UITLS    bool   `json:"uiTLS"`
 
 	RateLimitPerSec            float64 `json:"rateLimitPerSec"`
 	RateBurst                  int     `json:"rateBurst"`
@@ -114,6 +118,9 @@ func loadConfigFile(path string) (config, error) {
 		snapEntries:  fc.SnapshotEntries,
 		compaction:   fc.CompactionOverhead,
 		maxRecvBytes: fc.MaxRecvBytes,
+		uiEnable:     fc.UIEnable,
+		uiBind:       fc.UIBind,
+		uiTLS:        fc.UITLS,
 		members:      map[uint64]string{},
 		seed:         map[uint64]string{},
 	}
@@ -171,6 +178,8 @@ func loadConfigFile(path string) (config, error) {
 		return config{}, fmt.Errorf("--config: gossip requires nodeHostID, gossipBind, and gossipSeeds")
 	case !cfg.join && len(cfg.members) == 0:
 		return config{}, fmt.Errorf("--config: peers is required unless join is set")
+	case cfg.uiEnable && cfg.uiBind == "":
+		return config{}, fmt.Errorf("--config: uiEnable requires uiBind")
 	}
 	return cfg, nil
 }

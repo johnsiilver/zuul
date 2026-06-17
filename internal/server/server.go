@@ -12,20 +12,21 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/gostdlib/base/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/status"
 
+	"github.com/johnsiilver/zuul/context"
+
 	"github.com/johnsiilver/zuul/errors"
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/cmd"
-	"github.com/johnsiilver/zuul/internal/fsm"
-	"github.com/johnsiilver/zuul/internal/fsm/fsmpb"
-	"github.com/johnsiilver/zuul/internal/keypath"
-	"github.com/johnsiilver/zuul/internal/metrics"
-	"github.com/johnsiilver/zuul/internal/router"
-	"github.com/johnsiilver/zuul/internal/session"
-	"github.com/johnsiilver/zuul/internal/watch"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/auth/keypath"
+	"github.com/johnsiilver/zuul/internal/cluster/router"
+	"github.com/johnsiilver/zuul/internal/lock/session"
+	"github.com/johnsiilver/zuul/internal/lock/watch"
+	"github.com/johnsiilver/zuul/internal/otel/metrics"
+	"github.com/johnsiilver/zuul/internal/raft/cmd"
+	"github.com/johnsiilver/zuul/internal/raft/fsm"
+	"github.com/johnsiilver/zuul/internal/raft/fsm/fsmpb"
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
 
@@ -223,7 +224,7 @@ func (s *Server) KeepAlive(stream zuulv1.Session_KeepAliveServer) error {
 // or be re-attached on the next reconnect).
 func (s *Server) recoverSession(ctx context.Context, clientID string) {
 	g := context.Pool(ctx).Group()
-	for _, shardID := range s.cfg.Router.Shards() {
+	for _, shardID := range s.cfg.Router.Shards().All() {
 		shardID := shardID
 		g.Go(ctx, func(ctx context.Context) error {
 			v, err := s.cfg.Reader.Read(ctx, shardID, fsm.LeaseQuery{ClientID: clientID})
@@ -267,8 +268,9 @@ func (s *Server) Lock(ctx context.Context, req *zuulv1.LockRequest) (*zuulv1.Loc
 		return nil, sessionErr(ctx, err)
 	}
 
-	// Subscribe before proposing so a promotion event cannot be missed.
-	sub := s.cfg.Hub.Subscribe(req.GetName())
+	// Subscribe before proposing so a promotion event cannot be missed. This caller is a
+	// contender, not an observer (Track false): it is reported from the FSM wait-queue.
+	sub := s.cfg.Hub.Subscribe(watch.SubArgs{Key: req.GetName()})
 	defer sub.Close()
 
 	res, err := s.propose(ctx, shardID, cmd.Acquire(req.GetName(), req.GetClientId(), false))
@@ -302,6 +304,14 @@ func (s *Server) waitForLock(ctx context.Context, req *zuulv1.LockRequest, sub *
 	for {
 		e, err := sub.Next(wait)
 		if err != nil {
+			// Our promotion may have been coalesced away entirely, so the wait deadline
+			// fires before any matching event arrives. cancelWait never releases a holder
+			// (see fsm.cancelWait), so reporting Acquired:false here while we are in fact
+			// the holder would strand the lock until our lease lapses. Confirm against the
+			// FSM before giving up — the same backstop the per-event loop uses below.
+			if held, herr := s.holdsLock(ctx, shardID, req.GetName(), req.GetClientId()); herr == nil && held != nil {
+				return held, nil
+			}
 			s.cancelWait(req.GetName(), req.GetClientId(), shardID)
 			// If the RPC's own context is still alive, only the derived wait deadline
 			// fired → a bounded-wait timeout, not a fault.
@@ -313,7 +323,30 @@ func (s *Server) waitForLock(ctx context.Context, req *zuulv1.LockRequest, sub *
 		if e.Holder == req.GetClientId() {
 			return &zuulv1.LockResponse{Acquired: true, LockKey: e.Key, FencingToken: e.Token, Revision: e.Revision}, nil
 		}
+		// The hub coalesces: it keeps only the latest event, so our own promotion can be
+		// overwritten by a later event for the same key before we read it. The event
+		// holder not being us is therefore not proof we were not granted the lock — only
+		// an authoritative read is. Confirm against the FSM before looping back to wait.
+		if held, err := s.holdsLock(ctx, shardID, req.GetName(), req.GetClientId()); err == nil && held != nil {
+			return held, nil
+		}
 	}
+}
+
+// holdsLock authoritatively checks whether clientID currently holds name on shardID
+// via a linearizable read. It returns a granted LockResponse when the client holds the
+// lock, nil when it does not, and an error if the read fails. It is the backstop for
+// the hub's event coalescing: a promotion that was overwritten before the waiter read
+// it is still observable here.
+func (s *Server) holdsLock(ctx context.Context, shardID uint64, name, clientID string) (*zuulv1.LockResponse, error) {
+	st, err := s.readStatus(ctx, shardID, name, zuulv1.ReadMode_READ_MODE_LINEARIZABLE)
+	if err != nil {
+		return nil, err
+	}
+	if st.Held && st.Holder == clientID {
+		return &zuulv1.LockResponse{Acquired: true, LockKey: name, FencingToken: st.Token, Revision: st.Revision}, nil
+	}
+	return nil, nil
 }
 
 // cancelWait dequeues a timed-out waiter on a detached context (the RPC's is done).
@@ -439,7 +472,7 @@ func (s *Server) readStatus(ctx context.Context, shardID uint64, name string, mo
 // fencing token select WHICH lock state is acted on, they are not credentials). Use
 // distinct key prefixes per identity when clients must not touch each other's locks.
 func (s *Server) authorize(ctx context.Context, key string, op authz.Op) error {
-	identity, _ := authz.IdentityFromContext(ctx)
+	identity, _ := context.IdentityFromContext(ctx)
 	if err := s.cfg.Authorizer.Authorize(identity, key, op); err != nil {
 		return errors.E(ctx, errors.CatPermission, errors.TypeUnauthorizedKey, fmt.Errorf("client %q is not authorized for key %q", identity, key))
 	}

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/errors"
 )

@@ -4,14 +4,13 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	"github.com/johnsiilver/zuul/client"
-	"github.com/johnsiilver/zuul/internal/authz"
-	"github.com/johnsiilver/zuul/internal/zuultls"
+	"github.com/johnsiilver/zuul/internal/auth/authz"
+	"github.com/johnsiilver/zuul/internal/auth/zuultls"
 )
 
 // TestACLPathEnforcement proves path-based ACLs over the insecure transport with the
@@ -93,8 +92,8 @@ func TestAuthzEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestAuthzEnforcement: client TLS: %s", err)
 	}
-	creds := grpc.WithTransportCredentials(credentials.NewTLS(clientTLS))
-	cl, err := client.New(ctx, client.Endpoints{c.grpcAddrs[c.nodes[0].replicaID]}, client.WithClientID("alice"), client.WithTTL(30*time.Second), client.WithDialOptions(creds))
+	tc := credentials.NewTLS(clientTLS)
+	cl, err := client.New(ctx, client.Endpoints{c.grpcAddrs[c.nodes[0].replicaID]}, client.WithClientID("alice"), client.WithTTL(30*time.Second), client.WithTransportCredentials(tc))
 	if err != nil {
 		t.Fatalf("TestAuthzEnforcement: Dial: %s", err)
 	}

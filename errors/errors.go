@@ -16,9 +16,10 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/gostdlib/base/context"
 	"github.com/gostdlib/base/errors"
 	"github.com/gostdlib/base/retry/exponential"
+
+	"github.com/johnsiilver/zuul/context"
 
 	"google.golang.org/grpc/codes"
 )
@@ -136,9 +137,32 @@ const (
 	TypeDiscovery // Discovery
 )
 
-// Error is zuul's error type. It is base/errors.Error, carrying a Category and Type.
-// Functions should return the error interface, never this concrete type.
-type Error = errors.Error
+// Error is zuul's service error type: a base/errors.Error (carrying a Category and Type)
+// that additionally reports a gRPC status code via GRPCStatus, so status.Code(err) yields
+// the Category's code throughout the program — not only after the server boundary
+// interceptor maps it. It unwraps to the underlying base error, so errors.Is/As keep
+// working. E returns it; functions should return the error interface, never this concrete
+// type.
+type Error struct {
+	base errors.Error
+}
+
+// Error returns the underlying (possibly redacted) message.
+func (e Error) Error() string { return e.base.Error() }
+
+// Unwrap exposes the underlying base error for errors.Is/As and status round-tripping.
+func (e Error) Unwrap() error { return e.base }
+
+// Is links back by Category and Type. It unwraps target to its underlying base error
+// first, so two E()-produced errors compare equal — the base error's Is only matches a
+// target that is itself a base error.
+func (e Error) Is(target error) bool {
+	var bt errors.Error
+	if As(target, &bt) {
+		return e.base.Is(bt)
+	}
+	return false
+}
 
 // EOption is an optional argument for E.
 type EOption = errors.EOption
@@ -164,16 +188,19 @@ var (
 // legitimate operational errors. Tighten or loosen here as needed.
 var secretRE = regexp.MustCompile(`(?i)(bearer\s+[A-Za-z0-9._\-]{8,}|eyJ[A-Za-z0-9._\-]{10,}|(password|passwd|api[_\- ]?key|secret)\s*[:=]\s*\S+)`)
 
-// E stamps msg with the given Category and Type via base/errors and returns the Error.
-// If msg is already an Error it is returned unchanged. If the message looks like it
-// contains a secret it is redacted. file/line are recorded for E's caller.
-func E(ctx context.Context, c Category, t Type, msg error, options ...EOption) Error {
+// E stamps msg with the given Category and Type via base/errors and returns the error.
+// If the message looks like it contains a secret it is redacted. file/line are recorded
+// for E's caller. The returned error also reports a gRPC status (see [statusError]), so
+// status.Code(err) yields the Category's code anywhere in the program, not only after the
+// server boundary interceptor has mapped it. It unwraps to the underlying Error, so
+// errors.Is/As against an Error still match.
+func E(ctx context.Context, c Category, t Type, msg error, options ...EOption) error {
 	opts := append([]EOption{WithCallNum(2)}, options...)
 	e := errors.E(ctx, c, t, msg, opts...)
 	if msg != nil && e.MsgOverride == "" && secretRE.MatchString(msg.Error()) {
 		e.MsgOverride = "[redacted for security]"
 	}
-	return e
+	return Error{base: e}
 }
 
 // ErrPermanent marks an error as non-retryable so retry/exponential stops. Do not return

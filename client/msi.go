@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/gostdlib/base/concurrency/sync"
-	"github.com/gostdlib/base/context"
 	"github.com/gostdlib/base/retry/exponential"
+
+	"github.com/johnsiilver/zuul/context"
 
 	"github.com/johnsiilver/zuul/errors"
 )
@@ -112,7 +113,9 @@ func (s *msiSource) get(ctx context.Context) (string, error) {
 
 // backgroundRefresh renews the token off the request path, on a detached context so
 // it is not cancelled when the triggering RPC ends. The caller has already won the
-// refreshing CAS; this clears it when done.
+// refreshing CAS; this clears it when done. The detached context is never cancelled, so
+// Submit always enqueues the closure (see worker.Pool.Submit) and the deferred reset
+// always runs — the refreshing flag cannot stick.
 func (s *msiSource) backgroundRefresh() {
 	bg := context.Background()
 	context.Pool(bg).Submit(bg, func() {
@@ -120,8 +123,13 @@ func (s *msiSource) backgroundRefresh() {
 		ctx, cancel := context.WithTimeout(bg, 30*time.Second)
 		defer cancel()
 		s.refreshMu.Lock()
-		_ = s.boff.Retry(ctx, func(ctx context.Context, _ exponential.Record) error { return s.refresh(ctx) })
+		err := s.boff.Retry(ctx, func(ctx context.Context, _ exponential.Record) error { return s.refresh(ctx) })
 		s.refreshMu.Unlock()
+		if err != nil {
+			// A still-valid token is being served meanwhile; surface the failure so a
+			// persistent IMDS problem is visible before the token hard-expires.
+			context.Log(ctx).Warn("zuul: MSI background token refresh failed", "err", err.Error())
+		}
 	})
 }
 
