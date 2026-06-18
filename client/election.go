@@ -1,11 +1,12 @@
 package client
 
 import (
-	"time"
-
 	"github.com/gostdlib/base/retry/exponential"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/johnsiilver/zuul/context"
+	"github.com/johnsiilver/zuul/errors"
 
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
@@ -37,12 +38,23 @@ func (c *Client) NewElection(name string) *Election {
 	return &Election{client: c, name: name}
 }
 
-// Campaign enters the election and blocks until this client leads it. With a
-// non-zero wait it bounds the wait and returns ErrNotAcquired if it expires.
-func (e *Election) Campaign(ctx context.Context, value []byte, wait time.Duration) error {
+// Campaign enters the election and blocks until this client leads it. If context.Deadline is set,
+// this will return ErrNotAcquired if it expires. Once leadership is held, a cancelled context will
+// not cause the election to be resigned; it must be explicitly resigned.
+func (e *Election) Campaign(ctx context.Context, value []byte) (err error) {
+	defer func() {
+		switch status.Code(err) {
+		case codes.DeadlineExceeded:
+			err = ErrNotAcquired
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = ErrNotAcquired
+		}
+	}()
+
 	req := &zuulv1.CampaignRequest{Name: e.name, ClientId: e.client.clientID, Value: value}
-	if wait > 0 {
-		req.WaitDeadlineUnixNano = time.Now().Add(wait).UnixNano()
+	if d, ok := ctx.Deadline(); ok {
+		req.WaitDeadlineUnixNano = d.UnixNano()
 	}
 	resp, err := e.client.election.Campaign(ctx, req)
 	if err != nil {

@@ -1,9 +1,10 @@
 package client
 
 import (
-	"time"
-
 	"github.com/johnsiilver/zuul/context"
+	"github.com/johnsiilver/zuul/errors"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 )
@@ -23,12 +24,22 @@ func (c *Client) NewMutex(name string) *Mutex {
 	return &Mutex{client: c, name: name}
 }
 
-// Lock blocks until the lock is held. With a non-zero wait it bounds the wait and
-// returns ErrNotAcquired if it expires.
-func (m *Mutex) Lock(ctx context.Context, wait time.Duration) error {
+// Lock blocks until the lock is held. If context.Deadline is set, this will return ErrNotAcquired if it expires.
+// Once the Lock is held, a cancelled context will not cause the lock to be released; it must be explicitly unlocked.
+func (m *Mutex) Lock(ctx context.Context) (err error) {
+	defer func() {
+		switch status.Code(err) {
+		case codes.DeadlineExceeded:
+			err = ErrNotAcquired
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = ErrNotAcquired
+		}
+	}()
+
 	req := &zuulv1.LockRequest{Name: m.name, ClientId: m.client.clientID}
-	if wait > 0 {
-		req.WaitDeadlineUnixNano = time.Now().Add(wait).UnixNano()
+	if d, ok := ctx.Deadline(); ok {
+		req.WaitDeadlineUnixNano = d.UnixNano()
 	}
 	resp, err := m.client.locker.Lock(ctx, req)
 	if err != nil {

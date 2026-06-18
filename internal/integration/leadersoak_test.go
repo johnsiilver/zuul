@@ -313,7 +313,7 @@ func (s *soaker) contender(ctx context.Context, ki, ci int) error {
 			continue
 		}
 
-		err := el.Campaign(ctx, s.electionValue(rng, clientID), 0) // block until we lead
+		err := el.Campaign(ctx, s.electionValue(rng, clientID)) // block until we lead
 		switch {
 		case ctx.Err() != nil:
 			return nil
@@ -417,7 +417,9 @@ func (s *soaker) doLock(ctx context.Context, cl *client.Client, rng *rand.Rand) 
 	if rng.Intn(2) == 0 {
 		ok, err = mu.TryLock(ctx)
 	} else {
-		err = mu.Lock(ctx, jitter(rng, 200*time.Millisecond, 2*time.Second))
+		ctx, cancel := context.WithTimeout(ctx, jitter(rng, 200*time.Millisecond, 2*time.Second))
+		defer cancel()
+		err = mu.Lock(ctx)
 		ok = err == nil
 		if err == client.ErrNotAcquired {
 			err = nil // a bounded-wait timeout is a normal outcome, not an error
@@ -449,7 +451,9 @@ func (s *soaker) doLock(ctx context.Context, cl *client.Client, rng *rand.Rand) 
 func (s *soaker) doChurnElection(ctx context.Context, cl *client.Client, clientID string, rng *rand.Rand) {
 	key := s.churnKeys[rng.Intn(s.cfg.churnKeys)]
 	el := cl.NewElection(key)
-	err := el.Campaign(ctx, s.electionValue(rng, clientID), jitter(rng, 250*time.Millisecond, 2*time.Second))
+	cctx, cancel := context.WithTimeout(ctx, jitter(rng, 250*time.Millisecond, 2*time.Second))
+	err := el.Campaign(cctx, s.electionValue(rng, clientID))
+	cancel()
 	switch {
 	case ctx.Err() != nil:
 		return
@@ -589,7 +593,10 @@ func (s *soaker) faultGhost() {
 		t.Logf("soak: ghost %s dial failed (skipping fault): %s", id, err)
 		return
 	}
-	if err := cl.NewElection(key).Campaign(ctx, []byte(id), 5*time.Second); err != nil {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	err = cl.NewElection(key).Campaign(cctx, []byte(id))
+	cancel()
+	if err != nil {
 		t.Logf("soak: ghost %s campaign failed (skipping fault): %s", id, err)
 		_ = cl.Close()
 		return

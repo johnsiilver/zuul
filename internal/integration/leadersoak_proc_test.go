@@ -172,7 +172,10 @@ func procWorker(ctx context.Context, eps client.Endpoints, w int) error {
 			_ = mu.Unlock(ctx)
 		}
 		el := cl.NewElection(fmt.Sprintf("/soak/proc/elect-%d", w%2))
-		if err := el.Campaign(ctx, []byte("v"), time.Second); err == nil {
+		cctx, cancel := context.WithTimeout(ctx, time.Second)
+		err := el.Campaign(cctx, []byte("v"))
+		cancel()
+		if err == nil {
 			sleepCtx(ctx, 100*time.Millisecond)
 			_ = el.Resign(ctx)
 		}

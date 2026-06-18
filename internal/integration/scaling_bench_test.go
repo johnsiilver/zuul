@@ -166,7 +166,7 @@ func benchLatencyConns(b *testing.B, conns int) {
 			m := clients[i].NewMutex(fmt.Sprintf("/bench/conn-%d", i))
 			for j := 0; j < ops; j++ {
 				t0 := time.Now()
-				if err := m.Lock(ctx, 0); err != nil {
+				if err := m.Lock(ctx); err != nil {
 					return fmt.Errorf("conn %d lock: %w", i, err)
 				}
 				if err := m.Unlock(ctx); err != nil {
@@ -307,7 +307,9 @@ func benchContended(b *testing.B, waiters int) {
 			m := clients[i].NewMutex(key)
 			for j := 0; j < ops; j++ {
 				t0 := time.Now()
-				if err := m.Lock(ctx, 60*time.Second); err != nil {
+				ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				defer cancel()
+				if err := m.Lock(ctx); err != nil {
 					return fmt.Errorf("waiter %d lock: %w", i, err)
 				}
 				lat[start+j] = time.Since(t0)

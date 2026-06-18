@@ -78,7 +78,9 @@ func TestClientBlockingLock(t *testing.T) {
 
 	done := make(chan error, 1)
 	bMu := bob.NewMutex("/test/blocking-mutex")
-	context.Pool(ctx).Submit(ctx, func() { done <- bMu.Lock(ctx, 5*time.Second) })
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	context.Pool(ctx).Submit(ctx, func() { done <- bMu.Lock(ctx) })
 
 	time.Sleep(200 * time.Millisecond) // let bob enqueue
 	if err := aMu.Unlock(ctx); err != nil {
@@ -107,7 +109,7 @@ func TestClientElection(t *testing.T) {
 		t.Fatalf("TestClientElection: Observe: %s", err)
 	}
 
-	if err := el.Campaign(ctx, []byte("alice-value"), 0); err != nil {
+	if err := el.Campaign(ctx, []byte("alice-value")); err != nil {
 		t.Fatalf("TestClientElection: Campaign: %s", err)
 	}
 
@@ -150,7 +152,7 @@ func TestClientFollowMaster(t *testing.T) {
 	const name = "/test/master-election"
 
 	aliceEl := alice.NewElection(name)
-	if err := aliceEl.Campaign(ctx, endpointValue(t, "10.0.0.1", 9001), 0); err != nil {
+	if err := aliceEl.Campaign(ctx, endpointValue(t, "10.0.0.1", 9001)); err != nil {
 		t.Fatalf("TestClientFollowMaster: alice Campaign: %s", err)
 	}
 
@@ -179,7 +181,7 @@ func TestClientFollowMaster(t *testing.T) {
 	// its own address, and the follower must converge on it.
 	bobEl := bob.NewElection(name)
 	camp := make(chan error, 1)
-	context.Pool(ctx).Submit(ctx, func() { camp <- bobEl.Campaign(ctx, endpointValue(t, "10.0.0.2", 9002), 0) })
+	context.Pool(ctx).Submit(ctx, func() { camp <- bobEl.Campaign(ctx, endpointValue(t, "10.0.0.2", 9002)) })
 
 	time.Sleep(200 * time.Millisecond) // let bob enqueue
 	if err := aliceEl.Resign(ctx); err != nil {

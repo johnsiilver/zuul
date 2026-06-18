@@ -67,7 +67,9 @@ file. So name keys under the owning principal, e.g. `/alice/orders/42`,
 One holder at a time; survives client pause via fencing tokens.
 ```go
 mu := cl.NewMutex("/svc/orders/42")
-if err := mu.Lock(ctx, 5*time.Second); err != nil { // blocks up to 5s
+ctx, cancel := context.WithTimeout(ctx, 5*time.Second) // set a deadline to bound the wait
+defer cancel()
+if err := mu.Lock(ctx); err != nil { // blocks until held or the ctx deadline expires
     // errors.Is(err, client.ErrNotAcquired) on a bounded-wait timeout
     return err
 }
@@ -83,7 +85,7 @@ useResource(mu.Token()) // PASS the fencing token to the guarded resource; a sta
 ### Single active instance (leader election)
 ```go
 el := cl.NewElection("/svc/leader")
-if err := el.Campaign(ctx, []byte("worker-1"), 0); err != nil { return err } // blocks until leader
+if err := el.Campaign(ctx, []byte("worker-1")); err != nil { return err } // blocks until leader (set a ctx deadline to bound the wait)
 defer el.Resign(ctx)
 // ... do leader-only work; el.Proclaim(ctx, newValue) updates the published value ...
 
@@ -101,7 +103,7 @@ import zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 
 // Master side: publish host:port (host may be an IP or a DNS name).
 val, _ := client.MarshalEndpoint(&zuulv1.Endpoint{Host: "primary.svc.cluster.local", Port: 8443})
-el.Campaign(ctx, val, 0)            // or el.Proclaim(ctx, val) to update
+el.Campaign(ctx, val)               // or el.Proclaim(ctx, val) to update
 
 // Client side: one-shot, or follow across failovers.
 m, ok, _ := el.Master(ctx)         // ok=false while leaderless; m.Address() == "host:port"

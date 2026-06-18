@@ -106,7 +106,7 @@ func run() error {
 		return fmt.Errorf("marshal endpoint: %w", err)
 	}
 	el := cl.NewElection("/demo/workers/leader")
-	if err := el.Campaign(ctx, endpoint, 0); err != nil {
+	if err := el.Campaign(ctx, endpoint); err != nil {
 		return fmt.Errorf("campaign: %w", err)
 	}
 	leader, err := el.Leader(ctx)

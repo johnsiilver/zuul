@@ -290,17 +290,49 @@ func (s *Server) Lock(ctx context.Context, req *zuulv1.LockRequest) (*zuulv1.Loc
 	}
 }
 
+// now returns the configured clock in unix nanoseconds, defaulting to wall-clock time
+// when unset (e.g. a Server built in tests without validate()).
+func (s *Server) now() int64 {
+	if s.cfg.Now == nil {
+		return time.Now().UnixNano()
+	}
+	return s.cfg.Now()
+}
+
+// boundedWaitGrace is reserved at the tail of a bounded wait so the handler can confirm
+// the outcome against the FSM and return a clean response while the RPC context — whose
+// deadline the client derives from the same wait instant — is still alive. Without it the
+// internal wait deadline and the RPC deadline fire together: the confirm read then runs on
+// a cancelled context, and a grant committed in that window strands the lock or leadership
+// until the client's lease lapses.
+const boundedWaitGrace = 500 * time.Millisecond
+
+// boundedWait derives the internal wait context for a queued caller from the requested
+// wait-deadline instant d (unix nanos), pulled earlier by up to boundedWaitGrace — never
+// more than half the remaining budget, so a real wait and a real grace window both remain.
+// When d is zero the wait is unbounded and ctx is returned unchanged. The returned cancel
+// must always be called.
+func (s *Server) boundedWait(ctx context.Context, d int64) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		return ctx, func() {}
+	}
+	grace := time.Duration(d-s.now()) / 2
+	if grace > boundedWaitGrace {
+		grace = boundedWaitGrace
+	}
+	if grace < 0 {
+		grace = 0
+	}
+	return context.WithDeadline(ctx, time.Unix(0, d).Add(-grace))
+}
+
 // waitForLock blocks a queued caller until it is promoted (its client id becomes
 // the holder), or the wait deadline passes — in which case it dequeues itself and
 // reports acquired=false. The promotion event is delivered by the local hub, since
 // the local FSM applies every committed command.
 func (s *Server) waitForLock(ctx context.Context, req *zuulv1.LockRequest, sub *watch.Sub, shardID uint64) (*zuulv1.LockResponse, error) {
-	wait := ctx
-	if d := req.GetWaitDeadlineUnixNano(); d > 0 {
-		var cancel context.CancelFunc
-		wait, cancel = context.WithDeadline(ctx, time.Unix(0, d))
-		defer cancel()
-	}
+	wait, cancel := s.boundedWait(ctx, req.GetWaitDeadlineUnixNano())
+	defer cancel()
 	for {
 		e, err := sub.Next(wait)
 		if err != nil {
@@ -308,7 +340,9 @@ func (s *Server) waitForLock(ctx context.Context, req *zuulv1.LockRequest, sub *
 			// fires before any matching event arrives. cancelWait never releases a holder
 			// (see fsm.cancelWait), so reporting Acquired:false here while we are in fact
 			// the holder would strand the lock until our lease lapses. Confirm against the
-			// FSM before giving up — the same backstop the per-event loop uses below.
+			// FSM before giving up — the same backstop the per-event loop uses below. The
+			// bounded wait reserves a grace window before the RPC deadline, so this read
+			// runs on a live ctx rather than racing the client's cancellation.
 			if held, herr := s.holdsLock(ctx, shardID, req.GetName(), req.GetClientId()); herr == nil && held != nil {
 				return held, nil
 			}

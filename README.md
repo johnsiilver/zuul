@@ -113,15 +113,17 @@ defer cl.Close()
 
 // --- Distributed lock ---
 mu := cl.NewMutex("/worker-1/orders/42")
-if err := mu.Lock(ctx, 5*time.Second); err != nil { // blocks up to 5s
+ctx, cancel := context.WithTimeout(ctx, 5 * time.Second)
+if err := mu.Lock(ctx); err != nil { // blocks up to 5s
     // ErrNotAcquired on timeout
 }
+defer cancel()
 defer mu.Unlock(ctx)
 useResource(mu.Token()) // pass the fencing token to whatever the lock guards
 
 // --- Leader election ---
 el := cl.NewElection("/worker-1/leader")
-if err := el.Campaign(ctx, []byte("worker-1"), 0); err != nil { /* ... */ } // blocks until leader
+if err := el.Campaign(ctx, []byte("worker-1")); err != nil { /* ... */ } // blocks until leader
 defer el.Resign(ctx)
 
 events, _ := el.Observe(ctx) // current leader, then every change
@@ -142,7 +144,7 @@ import zuulv1 "github.com/johnsiilver/zuul/proto/zuul/v1"
 // The master publishes where to reach it when it campaigns (or via Proclaim). Host
 // may be an IP literal or a DNS name — e.g. "db.prod.svc.cluster.local".
 value, _ := client.MarshalEndpoint(&zuulv1.Endpoint{Host: "10.0.0.4", Port: 8443})
-el.Campaign(ctx, value, 0)
+el.Campaign(ctx, value)
 
 // An observer resolves the current master to a dialable host:port...
 m, ok, _ := el.Master(ctx) // ok=false while leaderless

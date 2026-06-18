@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/johnsiilver/zuul/client"
+	"github.com/johnsiilver/zuul/context"
 	"github.com/johnsiilver/zuul/internal/auth/authz"
 	"github.com/johnsiilver/zuul/internal/auth/zuultls"
 )
@@ -56,13 +57,15 @@ func TestACLPathEnforcement(t *testing.T) {
 
 	// Cross-user read grant: bob may read alice's /alice/configs/ election but not
 	// participate in it.
-	if err := alice.NewElection("/alice/configs/leader").Campaign(ctx, []byte("alice"), 0); err != nil {
+	if err := alice.NewElection("/alice/configs/leader").Campaign(ctx, []byte("alice")); err != nil {
 		t.Fatalf("TestACLPathEnforcement: alice campaign: %s", err)
 	}
 	if _, err := bob.NewElection("/alice/configs/leader").Leader(ctx); err != nil {
 		t.Errorf("TestACLPathEnforcement: bob reads granted election: got err == %s, want nil", err)
 	}
-	if err := bob.NewElection("/alice/configs/leader").Campaign(ctx, []byte("bob"), time.Second); status.Code(err) != codes.PermissionDenied {
+	cctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := bob.NewElection("/alice/configs/leader").Campaign(cctx, []byte("bob")); status.Code(err) != codes.PermissionDenied {
 		t.Errorf("TestACLPathEnforcement: bob campaigns on read-only grant: got %s, want PermissionDenied", status.Code(err))
 	}
 

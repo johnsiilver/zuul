@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/johnsiilver/zuul/context"
 
@@ -58,15 +57,20 @@ func (s *Server) Campaign(ctx context.Context, req *zuulv1.CampaignRequest) (*zu
 // waitForLeadership blocks a queued candidate until it is promoted to leader, or the
 // wait deadline passes — in which case it withdraws and reports leadership=false.
 func (s *Server) waitForLeadership(ctx context.Context, req *zuulv1.CampaignRequest, sub *watch.Sub, shardID uint64) (*zuulv1.CampaignResponse, error) {
-	wait := ctx
-	if d := req.GetWaitDeadlineUnixNano(); d > 0 {
-		var cancel context.CancelFunc
-		wait, cancel = context.WithDeadline(ctx, time.Unix(0, d))
-		defer cancel()
-	}
+	wait, cancel := s.boundedWait(ctx, req.GetWaitDeadlineUnixNano())
+	defer cancel()
 	for {
 		e, err := sub.Next(wait)
 		if err != nil {
+			// Our promotion to leader may have been coalesced away entirely, so the wait
+			// deadline fires before any matching event arrives. cancelWait never demotes a
+			// leader, so reporting Leadership:false here while we are in fact the leader would
+			// strand it until our lease lapses. Confirm against the FSM before giving up — the
+			// bounded wait reserves a grace window before the RPC deadline, so this read runs
+			// on a live ctx rather than racing the client's cancellation.
+			if led, lerr := s.holdsLeadership(ctx, shardID, req.GetName(), req.GetClientId()); lerr == nil && led != nil {
+				return led, nil
+			}
 			s.cancelWait(req.GetName(), req.GetClientId(), shardID)
 			if req.GetWaitDeadlineUnixNano() > 0 && ctx.Err() == nil {
 				return &zuulv1.CampaignResponse{Leadership: false, LeaderKey: req.GetName()}, nil
@@ -76,7 +80,28 @@ func (s *Server) waitForLeadership(ctx context.Context, req *zuulv1.CampaignRequ
 		if e.Holder == req.GetClientId() {
 			return &zuulv1.CampaignResponse{Leadership: true, LeaderKey: e.Key, FencingToken: e.Token, Revision: e.Revision}, nil
 		}
+		// The hub coalesces events, so the leader not being us is not proof we were not
+		// promoted — only an authoritative read is. Confirm before looping back to wait.
+		if led, err := s.holdsLeadership(ctx, shardID, req.GetName(), req.GetClientId()); err == nil && led != nil {
+			return led, nil
+		}
 	}
+}
+
+// holdsLeadership authoritatively checks whether clientID currently leads name on shardID
+// via a linearizable read. It returns a granted CampaignResponse when the client leads,
+// nil when it does not, and an error if the read fails. It is the backstop for the hub's
+// event coalescing: a promotion that was overwritten before the waiter read it is still
+// observable here.
+func (s *Server) holdsLeadership(ctx context.Context, shardID uint64, name, clientID string) (*zuulv1.CampaignResponse, error) {
+	st, err := s.readStatus(ctx, shardID, name, zuulv1.ReadMode_READ_MODE_LINEARIZABLE)
+	if err != nil {
+		return nil, err
+	}
+	if st.Held && st.Holder == clientID {
+		return &zuulv1.CampaignResponse{Leadership: true, LeaderKey: name, FencingToken: st.Token, Revision: st.Revision}, nil
+	}
+	return nil, nil
 }
 
 // Proclaim updates the leader's published value without changing leadership.
